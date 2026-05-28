@@ -1,0 +1,7 @@
+Ok VSC is weird but I've managed to configure and build using ctrl+shift+p cmake set of tools configure and build.
+Well it worked after I've created launch json for debug MazeGame
+
+
+from here i want to write a wrapper for a window and present a window.
+
+i'm going to create a repo right now

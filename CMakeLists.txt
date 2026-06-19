@@ -12,10 +12,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(SOURCES
     Source/GrmWindowWrapper.cpp
     Source/WinMain.cpp
+    Source/DX12Context.cpp
 )
  
 set(HEADERS
     Source/GrmWindowWrapper.h
+    Source/DX12Context.h
 )
 
 # ---------------------------------------------------------------

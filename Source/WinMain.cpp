@@ -1,4 +1,5 @@
 #include "GrmWindowWrapper.h"
+#include "DX12Context.h"
 #include <stdio.h>
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
@@ -30,10 +31,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         return -1;
     }
 
-    //DX12Context dx12;
-    //dx12.Init(window.GetHWND(), window.GetWidth(), window.GetHeight());
+    DX12Context dx12;
+    if (!dx12.Init(window.GetHWND(), window.GetWidth(), window.GetHeight()))
+    {
+        MessageBoxW(nullptr, L"Failed to initialize DirectX 12.", L"DX12 Error", MB_OK | MB_ICONERROR);
+        return -1;
+    }
 
-    // -------------------- GAYME LOOP -------------------
+    // -------------------- GAME LOOP -------------------
     bool running = true;
     while (running)
     {
@@ -49,13 +54,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
             continue;
         }
 
-        // TODO: Engine::Update(timer.DeltaTime())
-        // TODO: Engine::Render()
-        // TODO: dx12.Present()
+        dx12.Present();
     }
 
-    // --- Shutdown -----------------------------------------------
-    // dx12.shutdown();
+    dx12.Shutdown();
     window.Shutdown();
     return 0;
 }

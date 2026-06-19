@@ -1,5 +1,26 @@
 {
+    "version": "2.0.0",
     "tasks": [
-    ],
-    "version": "2.0.0"
+        {
+            "label": "Build MazeGame",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}\\build",
+                "--config",
+                "Debug"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$msCompile"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
 }

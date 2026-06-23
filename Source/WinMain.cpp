@@ -129,6 +129,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         entity.mesh = cubeMesh;
         entity.material = material;
         entity.transform.SetPosition(-2.0f + i * 2.0f, 0.0f, -5.0f);
+        entity.transform.SetScale(0.75f + i * 0.2f, 0.75f + i * 0.2f, 0.75f + i * 0.2f);
+        entity.transform.SetRotation(QuatRotationAxis(vec3(0.0f, 1.0f, 0.0f), i * 0.35f));
         entity.material->color = vec4(
             0.2f + i * 0.3f,
             0.2f + (i % 2) * 0.5f,
@@ -151,6 +153,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         {
             Sleep(10);
             continue;
+        }
+
+        for (size_t i = 0; i < scene.GetEntities().size(); ++i)
+        {
+            const float rotationSpeed = 0.01f + static_cast<float>(i) * 0.006f;
+            scene.GetEntities()[i]->transform.Rotate(QuatRotationAxis(vec3(0.0f, 1.0f, 0.0f), rotationSpeed));
         }
 
         dx12.BeginFrame();

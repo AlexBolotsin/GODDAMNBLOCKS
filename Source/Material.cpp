@@ -31,7 +31,7 @@ bool Material::CreateRootSignature(ID3D12Device* device)
     D3D12_ROOT_PARAMETER rootParams[1] = {};
     
     D3D12_ROOT_CONSTANTS rootConstants = {};
-    rootConstants.Num32BitValues = 4 + 4; // position offset vec4 + color vec4
+    rootConstants.Num32BitValues = 16 + 4 + 4; // viewProj matrix + position offset + color
     rootConstants.ShaderRegister = 0;
     rootConstants.RegisterSpace = 0;
     
@@ -72,6 +72,7 @@ bool Material::CreatePipelineState(ID3D12Device* device)
     static const char* kShaderSource = R"(
 cbuffer PerObject : register(b0)
 {
+    row_major float4x4 viewProj;
     float4 positionOffset;
     float4 tintColor;
 };
@@ -92,22 +93,8 @@ struct PSInput
 PSInput VSMain(VSInput input)
 {
     PSInput output;
-    float3 worldPos = input.position + positionOffset.xyz;
-
-    const float aspect = 16.0f / 9.0f;
-    const float nearZ = 0.1f;
-    const float farZ = 100.0f;
-    const float focalLength = 1.7320508f; // 60 degree vertical FOV
-
-    float viewZ = max(-worldPos.z, nearZ);
-
-    float4 clipPos;
-    clipPos.x = worldPos.x * (focalLength / aspect);
-    clipPos.y = worldPos.y * focalLength;
-    clipPos.z = viewZ * (farZ / (farZ - nearZ)) - (nearZ * farZ / (farZ - nearZ));
-    clipPos.w = viewZ;
-
-    output.position = clipPos;
+    float4 worldPos = float4(input.position + positionOffset.xyz, 1.0f);
+    output.position = mul(worldPos, viewProj);
     output.color = tintColor;
     return output;
 }
@@ -203,10 +190,10 @@ float4 PSMain(PSInput input) : SV_TARGET
     rasterizerDesc.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
 
     D3D12_DEPTH_STENCIL_DESC depthStencilDesc = {};
-    depthStencilDesc.DepthEnable = FALSE;
+    depthStencilDesc.DepthEnable = TRUE;
     depthStencilDesc.StencilEnable = FALSE;
-    depthStencilDesc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-    depthStencilDesc.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    depthStencilDesc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    depthStencilDesc.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
     psoDesc.pRootSignature = m_rootSignature.Get();
@@ -223,7 +210,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     psoDesc.NumRenderTargets = 1;
     psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    psoDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     psoDesc.SampleDesc.Count = 1;
     psoDesc.SampleDesc.Quality = 0;
 

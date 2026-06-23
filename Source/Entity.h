@@ -16,5 +16,5 @@ public:
     std::shared_ptr<Material> material;
     bool enabled = true;
 
-    void Draw(ID3D12GraphicsCommandList* commandList) const;
+    void Draw(ID3D12GraphicsCommandList* commandList, float aspectRatio) const;
 };

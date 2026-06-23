@@ -24,6 +24,9 @@ bool DX12Context::Init(HWND hwnd, uint32_t width, uint32_t height)
     if (!CreateRenderTargetViews())
         return false;
 
+    if (!CreateDepthStencilBuffer())
+        return false;
+
     if (!CreateFenceAndEvent())
         return false;
 
@@ -51,6 +54,8 @@ void DX12Context::Shutdown()
 
     m_commandList.Reset();
     m_rtvHeap.Reset();
+    m_dsvHeap.Reset();
+    m_depthStencil.Reset();
     m_swapChain.Reset();
     m_commandQueue.Reset();
     m_fence.Reset();
@@ -166,6 +171,62 @@ bool DX12Context::CreateRenderTargetViews()
     return true;
 }
 
+bool DX12Context::CreateDepthStencilBuffer()
+{
+    if (!m_dsvHeap)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
+        dsvHeapDesc.NumDescriptors = 1;
+        dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+
+        if (FAILED(m_device->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&m_dsvHeap))))
+            return false;
+    }
+
+    m_depthStencil.Reset();
+
+    D3D12_RESOURCE_DESC depthDesc = {};
+    depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    depthDesc.Alignment = 0;
+    depthDesc.Width = m_width;
+    depthDesc.Height = m_height;
+    depthDesc.DepthOrArraySize = 1;
+    depthDesc.MipLevels = 1;
+    depthDesc.Format = m_depthStencilFormat;
+    depthDesc.SampleDesc.Count = 1;
+    depthDesc.SampleDesc.Quality = 0;
+    depthDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+    D3D12_HEAP_PROPERTIES heapProps = {};
+    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_CLEAR_VALUE clearValue = {};
+    clearValue.Format = m_depthStencilFormat;
+    clearValue.DepthStencil.Depth = 1.0f;
+    clearValue.DepthStencil.Stencil = 0;
+
+    if (FAILED(m_device->CreateCommittedResource(
+        &heapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &depthDesc,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        &clearValue,
+        IID_PPV_ARGS(&m_depthStencil))))
+    {
+        return false;
+    }
+
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+    dsvDesc.Format = m_depthStencilFormat;
+    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    dsvDesc.Flags = D3D12_DSV_FLAG_NONE;
+
+    m_device->CreateDepthStencilView(m_depthStencil.Get(), &dsvDesc, m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
+    return true;
+}
+
 bool DX12Context::CreateFenceAndEvent()
 {
     if (FAILED(m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence))))
@@ -234,12 +295,14 @@ void DX12Context::Resize(uint32_t width, uint32_t height)
     {
         m_renderTargets[i].Reset();
     }
+    m_depthStencil.Reset();
 
     if (FAILED(m_swapChain->ResizeBuffers(FrameCount, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, 0)))
         return;
 
     m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
     CreateRenderTargetViews();
+    CreateDepthStencilBuffer();
 }
 
 void DX12Context::BeginFrame()
@@ -262,10 +325,12 @@ void DX12Context::BeginFrame()
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
     rtvHandle.ptr += m_frameIndex * m_rtvDescriptorSize;
+    D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
 
     const FLOAT clearColor[4] = { 0.12f, 0.18f, 0.27f, 1.0f };
-    m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+    m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
     m_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+    m_commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
     D3D12_VIEWPORT viewport = {};
     viewport.TopLeftX = 0.0f;
@@ -291,9 +356,11 @@ void DX12Context::RenderScene(Scene* scene)
     if (!scene)
         return;
 
+    const float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : (16.0f / 9.0f);
+
     for (auto& entity : scene->GetEntities())
     {
-        entity->Draw(m_commandList.Get());
+        entity->Draw(m_commandList.Get(), aspect);
     }
 }
 

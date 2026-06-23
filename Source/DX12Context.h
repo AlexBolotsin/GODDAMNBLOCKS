@@ -30,6 +30,7 @@ private:
     bool CreateCommandObjects();
     bool CreateSwapChain(HWND hwnd, uint32_t width, uint32_t height);
     bool CreateRenderTargetViews();
+    bool CreateDepthStencilBuffer();
     bool CreateFenceAndEvent();
     void WaitForGpu();
     void MoveToNextFrame();
@@ -44,12 +45,15 @@ private:
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_commandList;
     Microsoft::WRL::ComPtr<IDXGISwapChain3> m_swapChain;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_dsvHeap;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_renderTargets[FrameCount];
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_depthStencil;
     Microsoft::WRL::ComPtr<ID3D12Fence> m_fence;
 
     HANDLE m_fenceEvent = nullptr;
     uint64_t m_fenceValues[FrameCount] = {};
     uint32_t m_rtvDescriptorSize = 0;
+    DXGI_FORMAT m_depthStencilFormat = DXGI_FORMAT_D32_FLOAT;
     uint32_t m_frameIndex = 0;
     uint32_t m_width = 0;
     uint32_t m_height = 0;

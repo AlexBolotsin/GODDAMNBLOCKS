@@ -52,12 +52,12 @@ std::shared_ptr<Mesh> CreateCubeMesh(ID3D12Device* device)
 
     std::vector<uint32_t> indices =
     {
-        0, 1, 2, 0, 2, 3,       // Front
+        0, 2, 1, 0, 3, 2,       // Front
         4, 6, 5, 4, 7, 6,       // Back
-        8, 9, 10, 8, 10, 11,    // Top
-        12, 15, 14, 12, 14, 13, // Bottom
+        8, 10, 9, 8, 11, 10,    // Top
+        12, 14, 13, 12, 15, 14, // Bottom
         16, 17, 18, 16, 18, 19, // Right
-        20, 23, 22, 20, 22, 21  // Left
+        20, 21, 22, 20, 22, 23  // Left
     };
 
     auto mesh = std::make_shared<Mesh>();

@@ -11,15 +11,13 @@ void Entity::Draw(ID3D12GraphicsCommandList* commandList) const
     commandList->SetPipelineState(material->GetPipelineState());
     commandList->SetGraphicsRootSignature(material->GetRootSignature());
 
-    mat4 worldMatrix = transform.GetWorldMatrix();
-    
     struct PerObjectData
     {
-        mat4 worldMatrix;
+        vec4 positionOffset;
         vec4 color;
     } data;
     
-    data.worldMatrix = worldMatrix;
+    data.positionOffset = vec4(transform.position.x, transform.position.y, transform.position.z, 1.0f);
     data.color = material->color;
 
     commandList->SetGraphicsRoot32BitConstants(0, sizeof(data) / 4, &data, 0);

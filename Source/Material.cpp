@@ -31,7 +31,7 @@ bool Material::CreateRootSignature(ID3D12Device* device)
     D3D12_ROOT_PARAMETER rootParams[1] = {};
     
     D3D12_ROOT_CONSTANTS rootConstants = {};
-    rootConstants.Num32BitValues = 16 + 4; // mat4 + color vec4
+    rootConstants.Num32BitValues = 4 + 4; // position offset vec4 + color vec4
     rootConstants.ShaderRegister = 0;
     rootConstants.RegisterSpace = 0;
     
@@ -72,7 +72,7 @@ bool Material::CreatePipelineState(ID3D12Device* device)
     static const char* kShaderSource = R"(
 cbuffer PerObject : register(b0)
 {
-    row_major float4x4 worldMatrix;
+    float4 positionOffset;
     float4 tintColor;
 };
 
@@ -92,7 +92,7 @@ struct PSInput
 PSInput VSMain(VSInput input)
 {
     PSInput output;
-    float4 worldPos = mul(float4(input.position, 1.0f), worldMatrix);
+    float3 worldPos = input.position + positionOffset.xyz;
 
     // Temporary orthographic-like projection so geometry is visible
     output.position = float4(worldPos.x * 0.25f, worldPos.y * 0.25f, 0.5f, 1.0f);

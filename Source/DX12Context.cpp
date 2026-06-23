@@ -1,6 +1,6 @@
 #include "DX12Context.h"
-#include <stdexcept>
-#include <cassert>
+#include "Scene.h"
+
 
 DX12Context::~DX12Context()
 {
@@ -242,12 +242,8 @@ void DX12Context::Resize(uint32_t width, uint32_t height)
     CreateRenderTargetViews();
 }
 
-void DX12Context::Present()
+void DX12Context::BeginFrame()
 {
-    assert(m_commandList);
-    assert(m_commandQueue);
-    assert(m_renderTargets[m_frameIndex]);
-
     if (FAILED(m_commandAllocators[m_frameIndex]->Reset()))
         return;
 
@@ -271,6 +267,43 @@ void DX12Context::Present()
     m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
     m_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
 
+    D3D12_VIEWPORT viewport = {};
+    viewport.TopLeftX = 0.0f;
+    viewport.TopLeftY = 0.0f;
+    viewport.Width = static_cast<float>(m_width);
+    viewport.Height = static_cast<float>(m_height);
+    viewport.MinDepth = 0.0f;
+    viewport.MaxDepth = 1.0f;
+
+    D3D12_RECT scissorRect = {};
+    scissorRect.left = 0;
+    scissorRect.top = 0;
+    scissorRect.right = static_cast<LONG>(m_width);
+    scissorRect.bottom = static_cast<LONG>(m_height);
+
+    m_commandList->RSSetViewports(1, &viewport);
+    m_commandList->RSSetScissorRects(1, &scissorRect);
+    m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+}
+
+void DX12Context::RenderScene(Scene* scene)
+{
+    if (!scene)
+        return;
+
+    for (auto& entity : scene->GetEntities())
+    {
+        entity->Draw(m_commandList.Get());
+    }
+}
+
+void DX12Context::EndFrame()
+{
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barrier.Transition.pResource = m_renderTargets[m_frameIndex].Get();
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
     m_commandList->ResourceBarrier(1, &barrier);

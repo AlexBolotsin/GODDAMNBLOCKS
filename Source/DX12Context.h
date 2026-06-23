@@ -6,6 +6,8 @@
 #include <dxgi1_6.h>
 #include <cstdint>
 
+class Scene;
+
 class DX12Context
 {
 public:
@@ -15,7 +17,13 @@ public:
     bool Init(HWND hwnd, uint32_t width, uint32_t height);
     void Shutdown();
     void Resize(uint32_t width, uint32_t height);
-    void Present();
+    
+    void BeginFrame();
+    void RenderScene(Scene* scene);
+    void EndFrame();
+
+    ID3D12Device* GetDevice() const { return m_device.Get(); }
+    ID3D12GraphicsCommandList* GetCommandList() const { return m_commandList.Get(); }
 
 private:
     bool CreateDevice();

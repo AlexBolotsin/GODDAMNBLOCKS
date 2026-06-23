@@ -1,7 +1,7 @@
 #pragma once
 
-#include <windows.h>
-#include <cstdio>
+#pragma warning(disable: 4530 4577)  // Disable cmath-related warnings
+
 #include <string>
 #include <functional>
 

@@ -103,6 +103,7 @@ struct PSInput
 {
     float4 position : SV_POSITION;
     float4 color    : COLOR;
+    float lighting  : TEXCOORD0;
 };
 
 PSInput VSMain(VSInput input)
@@ -112,12 +113,18 @@ PSInput VSMain(VSInput input)
     float4 viewPos = mul(worldPos, viewMatrix);
     output.position = mul(viewPos, projMatrix);
     output.color = tintColor;
+
+    float3 normalWS = normalize(mul(float4(input.normal, 0.0f), worldMatrix).xyz);
+    float3 lightDirWS = normalize(float3(-0.4f, -1.0f, -0.6f));
+    float NdotL = saturate(dot(normalWS, -lightDirWS));
+    output.lighting = 0.2f + NdotL * 0.8f;
+
     return output;
 }
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    return input.color;
+    return float4(input.color.rgb * input.lighting, input.color.a);
 }
 )";
 

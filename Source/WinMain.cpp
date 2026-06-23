@@ -79,8 +79,8 @@ std::shared_ptr<Mesh> CreateGroundPlaneMesh(ID3D12Device* device)
 
     std::vector<uint32_t> indices =
     {
-        0, 1, 2,
-        0, 2, 3,
+        0, 2, 1,
+        0, 3, 2,
     };
 
     auto mesh = std::make_shared<Mesh>();

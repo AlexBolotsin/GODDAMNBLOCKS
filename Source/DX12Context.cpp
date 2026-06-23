@@ -4,6 +4,64 @@
 
 namespace
 {
+    vec3 Vec3Sub(const vec3& a, const vec3& b)
+    {
+        return vec3(a.x - b.x, a.y - b.y, a.z - b.z);
+    }
+
+    float Vec3Dot(const vec3& a, const vec3& b)
+    {
+        return a.x * b.x + a.y * b.y + a.z * b.z;
+    }
+
+    vec3 Vec3Cross(const vec3& a, const vec3& b)
+    {
+        return vec3(
+            a.y * b.z - a.z * b.y,
+            a.z * b.x - a.x * b.z,
+            a.x * b.y - a.y * b.x);
+    }
+
+    vec3 Vec3Normalize(const vec3& v)
+    {
+        const float lenSq = v.x * v.x + v.y * v.y + v.z * v.z;
+        if (lenSq <= 1e-12f)
+            return vec3(0.0f, 0.0f, 0.0f);
+
+        const float invLen = 1.0f / sqrtf(lenSq);
+        return vec3(v.x * invLen, v.y * invLen, v.z * invLen);
+    }
+
+    mat4 BuildLookAtRH(const vec3& eye, const vec3& target, const vec3& up)
+    {
+        const vec3 zAxis = Vec3Normalize(Vec3Sub(eye, target));
+        const vec3 xAxis = Vec3Normalize(Vec3Cross(up, zAxis));
+        const vec3 yAxis = Vec3Cross(zAxis, xAxis);
+
+        mat4 view;
+        view.m[0] = xAxis.x;
+        view.m[1] = yAxis.x;
+        view.m[2] = zAxis.x;
+        view.m[3] = 0.0f;
+
+        view.m[4] = xAxis.y;
+        view.m[5] = yAxis.y;
+        view.m[6] = zAxis.y;
+        view.m[7] = 0.0f;
+
+        view.m[8] = xAxis.z;
+        view.m[9] = yAxis.z;
+        view.m[10] = zAxis.z;
+        view.m[11] = 0.0f;
+
+        view.m[12] = -Vec3Dot(xAxis, eye);
+        view.m[13] = -Vec3Dot(yAxis, eye);
+        view.m[14] = -Vec3Dot(zAxis, eye);
+        view.m[15] = 1.0f;
+
+        return view;
+    }
+
     mat4 BuildPerspectiveRH(float fovYRadians, float aspect, float nearZ, float farZ)
     {
         mat4 result;
@@ -18,6 +76,12 @@ namespace
 
         return result;
     }
+}
+
+void DX12Context::SetCamera(const vec3& eye, const vec3& target)
+{
+    m_cameraEye = eye;
+    m_cameraTarget = target;
 }
 
 
@@ -377,9 +441,9 @@ void DX12Context::RenderScene(Scene* scene)
 
     const float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : (16.0f / 9.0f);
     FrameCameraData frameData;
-    frameData.viewMatrix = MatrixIdentity();
+    frameData.viewMatrix = BuildLookAtRH(m_cameraEye, m_cameraTarget, vec3(0.0f, 1.0f, 0.0f));
     frameData.projMatrix = BuildPerspectiveRH(1.0471976f, aspect, 0.1f, 100.0f);
-    frameData.cameraPosition = vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    frameData.cameraPosition = vec4(m_cameraEye.x, m_cameraEye.y, m_cameraEye.z, 1.0f);
 
     for (auto& entity : scene->GetEntities())
     {

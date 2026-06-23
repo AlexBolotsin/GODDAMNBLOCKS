@@ -5,6 +5,8 @@
 #include "Material.h"
 #include <stdio.h>
 #include <memory>
+#include <chrono>
+#include <cmath>
 
 // Helper: Create a simple cube mesh
 std::shared_ptr<Mesh> CreateCubeMesh(ID3D12Device* device)
@@ -141,6 +143,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
 
     // -------------------- GAME LOOP -------------------
     bool running = true;
+    const auto startTime = std::chrono::steady_clock::now();
     while (running)
     {
         if (!window.PumpMessages())
@@ -155,11 +158,35 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
             continue;
         }
 
+        const auto now = std::chrono::steady_clock::now();
+        const float t = std::chrono::duration<float>(now - startTime).count();
+
         for (size_t i = 0; i < scene.GetEntities().size(); ++i)
         {
-            const float rotationSpeed = 0.01f + static_cast<float>(i) * 0.006f;
-            scene.GetEntities()[i]->transform.Rotate(QuatRotationAxis(vec3(0.0f, 1.0f, 0.0f), rotationSpeed));
+            Entity* entity = scene.GetEntities()[i].get();
+            if (!entity)
+                continue;
+
+            const float phase = static_cast<float>(i) * 0.9f;
+
+            const float x = -2.0f + static_cast<float>(i) * 2.0f;
+            const float y = sinf(t * 1.6f + phase) * 0.35f;
+            const float z = -5.0f;
+            entity->transform.SetPosition(x, y, z);
+
+            const float angle = t * (0.7f + static_cast<float>(i) * 0.35f) + phase;
+            entity->transform.SetRotation(QuatRotationAxis(vec3(0.0f, 1.0f, 0.0f), angle));
         }
+
+        const float camAngle = t * 0.25f;
+        const float camRadius = 8.0f;
+        const float camHeight = 2.0f + sinf(t * 0.45f) * 0.35f;
+        const vec3 camTarget(0.0f, 0.0f, -5.0f);
+        const vec3 camPos(
+            camTarget.x + cosf(camAngle) * camRadius,
+            camHeight,
+            camTarget.z + sinf(camAngle) * camRadius);
+        dx12.SetCamera(camPos, camTarget);
 
         dx12.BeginFrame();
         dx12.RenderScene(&scene);

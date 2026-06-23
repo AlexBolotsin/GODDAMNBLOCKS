@@ -5,6 +5,7 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <cstdint>
+#include "EngineMath.h"
 
 class Scene;
 
@@ -17,6 +18,7 @@ public:
     bool Init(HWND hwnd, uint32_t width, uint32_t height);
     void Shutdown();
     void Resize(uint32_t width, uint32_t height);
+    void SetCamera(const vec3& eye, const vec3& target);
     
     void BeginFrame();
     void RenderScene(Scene* scene);
@@ -57,4 +59,6 @@ private:
     uint32_t m_frameIndex = 0;
     uint32_t m_width = 0;
     uint32_t m_height = 0;
+    vec3 m_cameraEye = vec3(0.0f, 0.0f, 0.0f);
+    vec3 m_cameraTarget = vec3(0.0f, 0.0f, -1.0f);
 };

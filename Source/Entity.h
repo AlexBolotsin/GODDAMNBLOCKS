@@ -5,6 +5,13 @@
 #include "Material.h"
 #include <memory>
 
+struct FrameCameraData
+{
+    mat4 viewMatrix;
+    mat4 projMatrix;
+    vec4 cameraPosition;
+};
+
 class Entity
 {
 public:
@@ -16,5 +23,5 @@ public:
     std::shared_ptr<Material> material;
     bool enabled = true;
 
-    void Draw(ID3D12GraphicsCommandList* commandList, float aspectRatio) const;
+    void Draw(ID3D12GraphicsCommandList* commandList, const FrameCameraData& frameData) const;
 };

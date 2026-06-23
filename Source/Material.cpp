@@ -28,19 +28,28 @@ void Material::Shutdown()
 
 bool Material::CreateRootSignature(ID3D12Device* device)
 {
-    D3D12_ROOT_PARAMETER rootParams[1] = {};
-    
-    D3D12_ROOT_CONSTANTS rootConstants = {};
-    rootConstants.Num32BitValues = 16 + 4 + 4; // viewProj matrix + position offset + color
-    rootConstants.ShaderRegister = 0;
-    rootConstants.RegisterSpace = 0;
-    
+    D3D12_ROOT_PARAMETER rootParams[2] = {};
+
+    D3D12_ROOT_CONSTANTS perFrameConstants = {};
+    perFrameConstants.Num32BitValues = 16 + 16 + 4; // view + projection + camera position
+    perFrameConstants.ShaderRegister = 0;
+    perFrameConstants.RegisterSpace = 0;
+
     rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    rootParams[0].Constants = rootConstants;
-    rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    rootParams[0].Constants = perFrameConstants;
+    rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_ROOT_CONSTANTS perObjectConstants = {};
+    perObjectConstants.Num32BitValues = 16 + 4; // world + tint
+    perObjectConstants.ShaderRegister = 1;
+    perObjectConstants.RegisterSpace = 0;
+
+    rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rootParams[1].Constants = perObjectConstants;
+    rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
-    rootSigDesc.NumParameters = 1;
+    rootSigDesc.NumParameters = 2;
     rootSigDesc.pParameters = rootParams;
     rootSigDesc.NumStaticSamplers = 0;
     rootSigDesc.pStaticSamplers = nullptr;
@@ -72,8 +81,14 @@ bool Material::CreatePipelineState(ID3D12Device* device)
     static const char* kShaderSource = R"(
 cbuffer PerObject : register(b0)
 {
-    row_major float4x4 viewProj;
-    float4 positionOffset;
+    row_major float4x4 viewMatrix;
+    row_major float4x4 projMatrix;
+    float4 cameraPosition;
+};
+
+cbuffer PerDraw : register(b1)
+{
+    row_major float4x4 worldMatrix;
     float4 tintColor;
 };
 
@@ -93,8 +108,9 @@ struct PSInput
 PSInput VSMain(VSInput input)
 {
     PSInput output;
-    float4 worldPos = float4(input.position + positionOffset.xyz, 1.0f);
-    output.position = mul(worldPos, viewProj);
+    float4 worldPos = mul(float4(input.position, 1.0f), worldMatrix);
+    float4 viewPos = mul(worldPos, viewMatrix);
+    output.position = mul(viewPos, projMatrix);
     output.color = tintColor;
     return output;
 }

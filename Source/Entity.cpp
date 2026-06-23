@@ -1,24 +1,6 @@
 #include "Entity.h"
 
-namespace
-{
-    mat4 BuildPerspectiveRH(float fovYRadians, float aspect, float nearZ, float farZ)
-    {
-        mat4 result;
-
-        const float f = 1.0f / tanf(fovYRadians * 0.5f);
-        result.m[0] = f / aspect;
-        result.m[5] = f;
-        result.m[10] = farZ / (nearZ - farZ);
-        result.m[11] = -1.0f;
-        result.m[14] = nearZ * farZ / (nearZ - farZ);
-        result.m[15] = 0.0f;
-
-        return result;
-    }
-}
-
-void Entity::Draw(ID3D12GraphicsCommandList* commandList, float aspectRatio) const
+void Entity::Draw(ID3D12GraphicsCommandList* commandList, const FrameCameraData& frameData) const
 {
     if (!enabled || !mesh || !material)
         return;
@@ -29,20 +11,29 @@ void Entity::Draw(ID3D12GraphicsCommandList* commandList, float aspectRatio) con
     commandList->SetPipelineState(material->GetPipelineState());
     commandList->SetGraphicsRootSignature(material->GetRootSignature());
 
-    const float safeAspect = (aspectRatio > 0.0f) ? aspectRatio : (16.0f / 9.0f);
+    struct PerFrameData
+    {
+        mat4 viewMatrix;
+        mat4 projMatrix;
+        vec4 cameraPosition;
+    } perFrameData;
+
+    perFrameData.viewMatrix = frameData.viewMatrix;
+    perFrameData.projMatrix = frameData.projMatrix;
+    perFrameData.cameraPosition = frameData.cameraPosition;
+
+    commandList->SetGraphicsRoot32BitConstants(0, sizeof(perFrameData) / 4, &perFrameData, 0);
 
     struct PerObjectData
     {
-        mat4 viewProj;
-        vec4 positionOffset;
+        mat4 worldMatrix;
         vec4 color;
-    } data;
+    } perObjectData;
 
-    data.viewProj = BuildPerspectiveRH(1.0471976f, safeAspect, 0.1f, 100.0f);
-    data.positionOffset = vec4(transform.position.x, transform.position.y, transform.position.z, 1.0f);
-    data.color = material->color;
+    perObjectData.worldMatrix = transform.GetWorldMatrix();
+    perObjectData.color = material->color;
 
-    commandList->SetGraphicsRoot32BitConstants(0, sizeof(data) / 4, &data, 0);
+    commandList->SetGraphicsRoot32BitConstants(1, sizeof(perObjectData) / 4, &perObjectData, 0);
 
     mesh->Draw(commandList);
 }

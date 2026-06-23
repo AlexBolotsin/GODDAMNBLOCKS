@@ -1,5 +1,24 @@
 #include "DX12Context.h"
 #include "Scene.h"
+#include <cmath>
+
+namespace
+{
+    mat4 BuildPerspectiveRH(float fovYRadians, float aspect, float nearZ, float farZ)
+    {
+        mat4 result;
+
+        const float f = 1.0f / tanf(fovYRadians * 0.5f);
+        result.m[0] = f / aspect;
+        result.m[5] = f;
+        result.m[10] = farZ / (nearZ - farZ);
+        result.m[11] = -1.0f;
+        result.m[14] = nearZ * farZ / (nearZ - farZ);
+        result.m[15] = 0.0f;
+
+        return result;
+    }
+}
 
 
 DX12Context::~DX12Context()
@@ -357,10 +376,14 @@ void DX12Context::RenderScene(Scene* scene)
         return;
 
     const float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : (16.0f / 9.0f);
+    FrameCameraData frameData;
+    frameData.viewMatrix = MatrixIdentity();
+    frameData.projMatrix = BuildPerspectiveRH(1.0471976f, aspect, 0.1f, 100.0f);
+    frameData.cameraPosition = vec4(0.0f, 0.0f, 0.0f, 1.0f);
 
     for (auto& entity : scene->GetEntities())
     {
-        entity->Draw(m_commandList.Get(), aspect);
+        entity->Draw(m_commandList.Get(), frameData);
     }
 }
 

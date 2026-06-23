@@ -16,7 +16,7 @@ void Entity::Draw(ID3D12GraphicsCommandList* commandList) const
         vec4 positionOffset;
         vec4 color;
     } data;
-    
+
     data.positionOffset = vec4(transform.position.x, transform.position.y, transform.position.z, 1.0f);
     data.color = material->color;
 

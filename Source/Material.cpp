@@ -94,9 +94,21 @@ PSInput VSMain(VSInput input)
     PSInput output;
     float3 worldPos = input.position + positionOffset.xyz;
 
-    // Temporary orthographic-like projection so geometry is visible
-    output.position = float4(worldPos.x * 0.25f, worldPos.y * 0.25f, 0.5f, 1.0f);
-    output.color = input.color * tintColor;
+    const float aspect = 16.0f / 9.0f;
+    const float nearZ = 0.1f;
+    const float farZ = 100.0f;
+    const float focalLength = 1.7320508f; // 60 degree vertical FOV
+
+    float viewZ = max(-worldPos.z, nearZ);
+
+    float4 clipPos;
+    clipPos.x = worldPos.x * (focalLength / aspect);
+    clipPos.y = worldPos.y * focalLength;
+    clipPos.z = viewZ * (farZ / (farZ - nearZ)) - (nearZ * farZ / (farZ - nearZ));
+    clipPos.w = viewZ;
+
+    output.position = clipPos;
+    output.color = tintColor;
     return output;
 }
 

@@ -18,8 +18,6 @@ public:
     ID3D12PipelineState* GetPipelineState() const { return m_pipelineState.Get(); }
     ID3D12RootSignature* GetRootSignature() const { return m_rootSignature.Get(); }
 
-    vec4 color = vec4(1.0f, 1.0f, 1.0f, 1.0f);
-
 private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_pipelineState;

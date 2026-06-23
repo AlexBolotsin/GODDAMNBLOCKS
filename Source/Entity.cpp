@@ -31,7 +31,7 @@ void Entity::Draw(ID3D12GraphicsCommandList* commandList, const FrameCameraData&
     } perObjectData;
 
     perObjectData.worldMatrix = transform.GetWorldMatrix();
-    perObjectData.color = material->color;
+        perObjectData.color = tint;
 
     commandList->SetGraphicsRoot32BitConstants(1, sizeof(perObjectData) / 4, &perObjectData, 0);
 

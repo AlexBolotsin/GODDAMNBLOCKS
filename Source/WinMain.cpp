@@ -140,39 +140,31 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         return -1;
     }
 
-    auto groundMaterial = std::make_shared<Material>();
-    if (!groundMaterial->Init(dx12.GetDevice()))
+    auto sharedMaterial = std::make_shared<Material>();
+    if (!sharedMaterial->Init(dx12.GetDevice()))
     {
-        MessageBoxW(nullptr, L"Failed to initialize ground material.", L"Material Error", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"Failed to initialize shared material.", L"Material Error", MB_OK | MB_ICONERROR);
         dx12.Shutdown();
         return -1;
     }
 
     Entity& ground = scene.CreateEntity();
     ground.mesh = groundMesh;
-    ground.material = groundMaterial;
+    ground.material = sharedMaterial;
     ground.transform.SetPosition(0.0f, -1.0f, -5.0f);
     ground.transform.SetScale(12.0f, 1.0f, 12.0f);
-    ground.material->color = vec4(0.25f, 0.28f, 0.30f, 1.0f);
+    ground.tint = vec4(0.25f, 0.28f, 0.30f, 1.0f);
 
     // Create multiple cubes with different positions and colors
     for (int i = 0; i < 3; ++i)
     {
-        auto material = std::make_shared<Material>();
-        if (!material->Init(dx12.GetDevice()))
-        {
-            MessageBoxW(nullptr, L"Failed to initialize material.", L"Material Error", MB_OK | MB_ICONERROR);
-            dx12.Shutdown();
-            return -1;
-        }
-
         Entity& entity = scene.CreateEntity();
         entity.mesh = cubeMesh;
-        entity.material = material;
+        entity.material = sharedMaterial;
         entity.transform.SetPosition(-2.0f + i * 2.0f, 0.0f, -5.0f);
         entity.transform.SetScale(0.75f + i * 0.2f, 0.75f + i * 0.2f, 0.75f + i * 0.2f);
         entity.transform.SetRotation(QuatRotationAxis(vec3(0.0f, 1.0f, 0.0f), i * 0.35f));
-        entity.material->color = vec4(
+        entity.tint = vec4(
             0.2f + i * 0.3f,
             0.2f + (i % 2) * 0.5f,
             0.2f + ((i + 1) % 2) * 0.5f,
@@ -200,7 +192,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         const auto now = std::chrono::steady_clock::now();
         const float t = std::chrono::duration<float>(now - startTime).count();
 
-        for (size_t i = 0; i < scene.GetEntities().size(); ++i)
+        for (size_t i = 1; i < scene.GetEntities().size(); ++i)
         {
             Entity* entity = scene.GetEntities()[i].get();
             if (!entity)

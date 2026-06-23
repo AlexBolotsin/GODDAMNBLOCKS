@@ -67,6 +67,29 @@ std::shared_ptr<Mesh> CreateCubeMesh(ID3D12Device* device)
     return mesh;
 }
 
+std::shared_ptr<Mesh> CreateGroundPlaneMesh(ID3D12Device* device)
+{
+    std::vector<Vertex> vertices =
+    {
+        { vec3(-1.0f, 0.0f, -1.0f), vec3(0, 1, 0), vec4(1, 1, 1, 1) },
+        { vec3(1.0f, 0.0f, -1.0f),  vec3(0, 1, 0), vec4(1, 1, 1, 1) },
+        { vec3(1.0f, 0.0f, 1.0f),   vec3(0, 1, 0), vec4(1, 1, 1, 1) },
+        { vec3(-1.0f, 0.0f, 1.0f),  vec3(0, 1, 0), vec4(1, 1, 1, 1) },
+    };
+
+    std::vector<uint32_t> indices =
+    {
+        0, 1, 2,
+        0, 2, 3,
+    };
+
+    auto mesh = std::make_shared<Mesh>();
+    if (!mesh->Init(device, vertices, indices))
+        return nullptr;
+
+    return mesh;
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
 {
     // Setup window
@@ -108,13 +131,29 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
 
     // Create shared mesh
     auto cubeMesh = CreateCubeMesh(dx12.GetDevice());
+    auto groundMesh = CreateGroundPlaneMesh(dx12.GetDevice());
 
-    if (!cubeMesh)
+    if (!cubeMesh || !groundMesh)
     {
-        MessageBoxW(nullptr, L"Failed to create cube mesh.", L"Mesh Error", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"Failed to create scene mesh.", L"Mesh Error", MB_OK | MB_ICONERROR);
         dx12.Shutdown();
         return -1;
     }
+
+    auto groundMaterial = std::make_shared<Material>();
+    if (!groundMaterial->Init(dx12.GetDevice()))
+    {
+        MessageBoxW(nullptr, L"Failed to initialize ground material.", L"Material Error", MB_OK | MB_ICONERROR);
+        dx12.Shutdown();
+        return -1;
+    }
+
+    Entity& ground = scene.CreateEntity();
+    ground.mesh = groundMesh;
+    ground.material = groundMaterial;
+    ground.transform.SetPosition(0.0f, -1.0f, -5.0f);
+    ground.transform.SetScale(12.0f, 1.0f, 12.0f);
+    ground.material->color = vec4(0.25f, 0.28f, 0.30f, 1.0f);
 
     // Create multiple cubes with different positions and colors
     for (int i = 0; i < 3; ++i)

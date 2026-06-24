@@ -24,5 +24,10 @@ public:
     vec4 tint = vec4(1.0f, 1.0f, 1.0f, 1.0f);
     bool enabled = true;
 
-    void Draw(ID3D12GraphicsCommandList* commandList, const FrameCameraData& frameData) const;
+    void Draw(
+        ID3D12GraphicsCommandList* commandList,
+        const FrameCameraData& frameData,
+        const mat4* worldOverride = nullptr,
+        const vec4* tintOverride = nullptr,
+        bool shadowPass = false) const;
 };

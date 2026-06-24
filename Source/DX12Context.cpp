@@ -76,6 +76,37 @@ namespace
 
         return result;
     }
+
+    mat4 BuildDirectionalShadowProjection(float planeY, const vec3& rayDir)
+    {
+        mat4 shadow;
+
+        const float safeY = (fabsf(rayDir.y) > 1e-4f) ? rayDir.y : -1e-4f;
+        const float kx = rayDir.x / safeY;
+        const float kz = rayDir.z / safeY;
+
+        shadow.m[0] = 1.0f;
+        shadow.m[4] = -kx;
+        shadow.m[8] = 0.0f;
+        shadow.m[12] = kx * planeY;
+
+        shadow.m[1] = 0.0f;
+        shadow.m[5] = 0.0f;
+        shadow.m[9] = 0.0f;
+        shadow.m[13] = planeY;
+
+        shadow.m[2] = 0.0f;
+        shadow.m[6] = -kz;
+        shadow.m[10] = 1.0f;
+        shadow.m[14] = kz * planeY;
+
+        shadow.m[3] = 0.0f;
+        shadow.m[7] = 0.0f;
+        shadow.m[11] = 0.0f;
+        shadow.m[15] = 1.0f;
+
+        return shadow;
+    }
 }
 
 void DX12Context::SetCamera(const vec3& eye, const vec3& target)
@@ -448,6 +479,41 @@ void DX12Context::RenderScene(Scene* scene)
     for (auto& entity : scene->GetEntities())
     {
         entity->Draw(m_commandList.Get(), frameData);
+    }
+
+    // Projected soft shadows onto ground plane (index 0 entity).
+    const float groundPlaneY = -0.99f;
+    const vec3 shadowRayDir = Vec3Normalize(vec3(-0.40f, -0.95f, -0.55f));
+    const mat4 shadowProj = BuildDirectionalShadowProjection(groundPlaneY, shadowRayDir);
+
+    const vec4 shadowTints[] =
+    {
+        vec4(0.0f, 0.0f, 0.0f, 0.16f),
+        vec4(0.0f, 0.0f, 0.0f, 0.08f),
+        vec4(0.0f, 0.0f, 0.0f, 0.08f),
+    };
+    const vec3 shadowOffsets[] =
+    {
+        vec3(0.0f, 0.0f, 0.0f),
+        vec3(0.06f, 0.0f, 0.03f),
+        vec3(-0.05f, 0.0f, -0.02f),
+    };
+
+    for (size_t i = 1; i < scene->GetEntities().size(); ++i)
+    {
+        Entity* entity = scene->GetEntities()[i].get();
+        if (!entity)
+            continue;
+
+        const mat4 objectWorld = entity->transform.GetWorldMatrix();
+        const mat4 projectedWorld = MatrixMultiply(objectWorld, shadowProj);
+
+        for (int s = 0; s < 3; ++s)
+        {
+            const mat4 offset = MatrixTranslation(shadowOffsets[s].x, shadowOffsets[s].y, shadowOffsets[s].z);
+            const mat4 shadowWorld = MatrixMultiply(projectedWorld, offset);
+            entity->Draw(m_commandList.Get(), frameData, &shadowWorld, &shadowTints[s], true);
+        }
     }
 }
 

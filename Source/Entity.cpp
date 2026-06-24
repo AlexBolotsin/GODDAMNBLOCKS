@@ -1,6 +1,11 @@
 #include "Entity.h"
 
-void Entity::Draw(ID3D12GraphicsCommandList* commandList, const FrameCameraData& frameData) const
+void Entity::Draw(
+    ID3D12GraphicsCommandList* commandList,
+    const FrameCameraData& frameData,
+    const mat4* worldOverride,
+    const vec4* tintOverride,
+    bool shadowPass) const
 {
     if (!enabled || !mesh || !material)
         return;
@@ -28,10 +33,12 @@ void Entity::Draw(ID3D12GraphicsCommandList* commandList, const FrameCameraData&
     {
         mat4 worldMatrix;
         vec4 color;
+        vec4 renderParams;
     } perObjectData;
 
-    perObjectData.worldMatrix = transform.GetWorldMatrix();
-        perObjectData.color = tint;
+    perObjectData.worldMatrix = worldOverride ? *worldOverride : transform.GetWorldMatrix();
+    perObjectData.color = tintOverride ? *tintOverride : tint;
+    perObjectData.renderParams = shadowPass ? vec4(1.0f, 0.0f, 0.0f, 0.0f) : vec4(0.0f, 0.0f, 0.0f, 0.0f);
 
     commandList->SetGraphicsRoot32BitConstants(1, sizeof(perObjectData) / 4, &perObjectData, 0);
 

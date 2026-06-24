@@ -40,7 +40,7 @@ bool Material::CreateRootSignature(ID3D12Device* device)
     rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_CONSTANTS perObjectConstants = {};
-    perObjectConstants.Num32BitValues = 16 + 4; // world + tint
+    perObjectConstants.Num32BitValues = 16 + 4 + 4; // world + tint + render params
     perObjectConstants.ShaderRegister = 1;
     perObjectConstants.RegisterSpace = 0;
 
@@ -90,6 +90,7 @@ cbuffer PerDraw : register(b1)
 {
     row_major float4x4 worldMatrix;
     float4 tintColor;
+    float4 renderParams;
 };
 
 struct VSInput
@@ -125,6 +126,17 @@ PSInput VSMain(VSInput input)
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
+    if (renderParams.x > 0.5f)
+    {
+        float cameraDistance = distance(input.worldPos, cameraPosition.xyz);
+        float fogStart = 8.0f;
+        float fogEnd = 22.0f;
+        float fogFactor = saturate((cameraDistance - fogStart) / (fogEnd - fogStart));
+
+        float alpha = input.color.a * (1.0f - fogFactor * 0.5f);
+        return float4(0.0f, 0.0f, 0.0f, alpha);
+    }
+
     float3 normalWS = normalize(input.normalWS);
 
     // Apply floor-only patterning and micro normal variation around the ground plane (y ~= -1).
@@ -253,13 +265,13 @@ float4 PSMain(PSInput input) : SV_TARGET
     blendDesc.AlphaToCoverageEnable = FALSE;
     blendDesc.IndependentBlendEnable = FALSE;
     D3D12_RENDER_TARGET_BLEND_DESC rtBlendDesc = {};
-    rtBlendDesc.BlendEnable = FALSE;
+    rtBlendDesc.BlendEnable = TRUE;
     rtBlendDesc.LogicOpEnable = FALSE;
-    rtBlendDesc.SrcBlend = D3D12_BLEND_ONE;
-    rtBlendDesc.DestBlend = D3D12_BLEND_ZERO;
+    rtBlendDesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    rtBlendDesc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
     rtBlendDesc.BlendOp = D3D12_BLEND_OP_ADD;
     rtBlendDesc.SrcBlendAlpha = D3D12_BLEND_ONE;
-    rtBlendDesc.DestBlendAlpha = D3D12_BLEND_ZERO;
+    rtBlendDesc.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
     rtBlendDesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
     rtBlendDesc.LogicOp = D3D12_LOGIC_OP_NOOP;
     rtBlendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;

@@ -153,7 +153,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     ground.material = sharedMaterial;
     ground.transform.SetPosition(0.0f, -1.0f, -5.0f);
     ground.transform.SetScale(12.0f, 1.0f, 12.0f);
-    ground.tint = vec4(0.25f, 0.28f, 0.30f, 1.0f);
+    ground.tint = vec4(0.95f, 0.95f, 0.95f, 1.0f);
 
     // Create multiple cubes with different positions and colors
     for (int i = 0; i < 3; ++i)

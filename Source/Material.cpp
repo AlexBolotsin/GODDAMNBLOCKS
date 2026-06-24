@@ -126,6 +126,32 @@ PSInput VSMain(VSInput input)
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float3 normalWS = normalize(input.normalWS);
+
+    // Apply floor-only patterning and micro normal variation around the ground plane (y ~= -1).
+    float floorMask = saturate(1.0f - abs(input.worldPos.y + 1.0f) * 4.0f);
+
+    float2 floorUV = input.worldPos.xz * 0.75f;
+    float checker = fmod(floor(floorUV.x) + floor(floorUV.y), 2.0f);
+    float2 cell = frac(floorUV);
+    float2 edgeDist = min(cell, 1.0f - cell);
+    float edge = min(edgeDist.x, edgeDist.y);
+    float gridLine = 1.0f - smoothstep(0.0f, 0.03f, edge);
+
+    float3 floorA = float3(0.20f, 0.23f, 0.26f);
+    float3 floorB = float3(0.27f, 0.30f, 0.34f);
+    float3 floorPattern = lerp(floorA, floorB, checker);
+    float variation = sin(input.worldPos.x * 0.35f) * cos(input.worldPos.z * 0.41f) * 0.04f;
+    floorPattern += variation;
+    floorPattern = lerp(floorPattern, floorPattern * 0.55f, gridLine * 0.70f);
+
+    float2 wave = float2(
+        sin(input.worldPos.x * 0.70f + input.worldPos.z * 0.20f),
+        cos(input.worldPos.z * 0.65f - input.worldPos.x * 0.15f));
+    float3 floorNormal = normalize(normalWS + float3(wave.x, 0.0f, wave.y) * (0.18f * floorMask));
+    normalWS = normalize(lerp(normalWS, floorNormal, floorMask));
+
+    float3 baseColor = lerp(input.color.rgb, floorPattern * input.color.rgb, floorMask);
+
     float3 lightDirWS = normalize(float3(-0.4f, -1.0f, -0.6f));
     float3 toLight = -lightDirWS;
     float3 viewDir = normalize(cameraPosition.xyz - input.worldPos);
@@ -135,7 +161,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float diffuse = saturate(dot(normalWS, toLight));
     float specular = pow(saturate(dot(normalWS, halfVec)), 32.0f) * 0.35f;
 
-    float3 litColor = input.color.rgb * (ambient + diffuse * 0.85f) + float3(specular, specular, specular);
+    float3 litColor = baseColor * (ambient + diffuse * 0.85f) + float3(specular, specular, specular);
 
     float cameraDistance = distance(input.worldPos, cameraPosition.xyz);
     float fogStart = 8.0f;

@@ -103,7 +103,9 @@ struct PSInput
 {
     float4 position : SV_POSITION;
     float4 color    : COLOR;
-    float lighting  : TEXCOORD0;
+    float3 worldPos : TEXCOORD0;
+    float3 normalWS : TEXCOORD1;
+    float2 clipYW   : TEXCOORD2;
 };
 
 PSInput VSMain(VSInput input)
@@ -113,18 +115,42 @@ PSInput VSMain(VSInput input)
     float4 viewPos = mul(worldPos, viewMatrix);
     output.position = mul(viewPos, projMatrix);
     output.color = tintColor;
+    output.worldPos = worldPos.xyz;
+    output.clipYW = float2(output.position.y, output.position.w);
 
-    float3 normalWS = normalize(mul(float4(input.normal, 0.0f), worldMatrix).xyz);
-    float3 lightDirWS = normalize(float3(-0.4f, -1.0f, -0.6f));
-    float NdotL = saturate(dot(normalWS, -lightDirWS));
-    output.lighting = 0.2f + NdotL * 0.8f;
+    output.normalWS = normalize(mul(float4(input.normal, 0.0f), worldMatrix).xyz);
 
     return output;
 }
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    return float4(input.color.rgb * input.lighting, input.color.a);
+    float3 normalWS = normalize(input.normalWS);
+    float3 lightDirWS = normalize(float3(-0.4f, -1.0f, -0.6f));
+    float3 toLight = -lightDirWS;
+    float3 viewDir = normalize(cameraPosition.xyz - input.worldPos);
+    float3 halfVec = normalize(toLight + viewDir);
+
+    float ambient = 0.20f;
+    float diffuse = saturate(dot(normalWS, toLight));
+    float specular = pow(saturate(dot(normalWS, halfVec)), 32.0f) * 0.35f;
+
+    float3 litColor = input.color.rgb * (ambient + diffuse * 0.85f) + float3(specular, specular, specular);
+
+    float cameraDistance = distance(input.worldPos, cameraPosition.xyz);
+    float fogStart = 8.0f;
+    float fogEnd = 22.0f;
+    float fogFactor = saturate((cameraDistance - fogStart) / (fogEnd - fogStart));
+
+    float ndcY = input.clipYW.x / max(abs(input.clipYW.y), 1e-4f);
+    float skyT = saturate(ndcY * 0.5f + 0.5f);
+
+    float3 skyHorizon = float3(0.64f, 0.70f, 0.78f);
+    float3 skyZenith = float3(0.24f, 0.38f, 0.62f);
+    float3 fogColor = lerp(skyHorizon, skyZenith, skyT);
+
+    float3 finalColor = lerp(litColor, fogColor, fogFactor);
+    return float4(finalColor, input.color.a);
 }
 )";
 

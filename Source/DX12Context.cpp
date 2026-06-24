@@ -410,7 +410,7 @@ void DX12Context::BeginFrame()
     rtvHandle.ptr += m_frameIndex * m_rtvDescriptorSize;
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
 
-    const FLOAT clearColor[4] = { 0.12f, 0.18f, 0.27f, 1.0f };
+    const FLOAT clearColor[4] = { 0.46f, 0.56f, 0.69f, 1.0f };
     m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
     m_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
     m_commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);

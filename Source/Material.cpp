@@ -152,16 +152,31 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     float3 baseColor = lerp(input.color.rgb, floorPattern * input.color.rgb, floorMask);
 
-    float3 lightDirWS = normalize(float3(-0.4f, -1.0f, -0.6f));
-    float3 toLight = -lightDirWS;
+    // Key light (sun): warm and directional.
+    float3 keyToLight = normalize(float3(0.40f, 0.95f, 0.55f));
+    float3 keyColor = float3(1.00f, 0.96f, 0.90f);
+
+    // Fill light: soft, cool, and opposite-ish direction for shape readability.
+    float3 fillToLight = normalize(float3(-0.45f, 0.70f, -0.55f));
+    float3 fillColor = float3(0.42f, 0.54f, 0.78f);
+
     float3 viewDir = normalize(cameraPosition.xyz - input.worldPos);
-    float3 halfVec = normalize(toLight + viewDir);
+    float3 keyHalfVec = normalize(keyToLight + viewDir);
 
-    float ambient = 0.20f;
-    float diffuse = saturate(dot(normalWS, toLight));
-    float specular = pow(saturate(dot(normalWS, halfVec)), 32.0f) * 0.35f;
+    float3 ambientColor = float3(0.20f, 0.21f, 0.23f);
+    float keyDiffuse = saturate(dot(normalWS, keyToLight));
+    float fillDiffuse = saturate(dot(normalWS, fillToLight));
 
-    float3 litColor = baseColor * (ambient + diffuse * 0.85f) + float3(specular, specular, specular);
+    float keySpecular = pow(saturate(dot(normalWS, keyHalfVec)), 32.0f) * 0.35f;
+
+    float rim = pow(1.0f - saturate(dot(normalWS, viewDir)), 3.0f);
+    rim *= 0.25f;
+    float3 rimColor = float3(0.55f, 0.65f, 0.90f);
+
+    float3 diffuseLighting = keyColor * (keyDiffuse * 0.85f) + fillColor * (fillDiffuse * 0.40f);
+    float3 litColor = baseColor * (ambientColor + diffuseLighting);
+    litColor += float3(keySpecular, keySpecular, keySpecular);
+    litColor += rimColor * rim;
 
     float cameraDistance = distance(input.worldPos, cameraPosition.xyz);
     float fogStart = 8.0f;

@@ -552,7 +552,7 @@ void DX12Context::RenderScene(Scene* scene)
     for (size_t i = 1; i < scene->GetEntities().size(); ++i)
     {
         Entity* entity = scene->GetEntities()[i].get();
-        if (!entity || entity->isBillboardActor || !entity->castsProjectedShadow)
+        if (!entity || !entity->castsProjectedShadow)
             continue;
 
         const mat4 objectWorld = entity->transform.GetWorldMatrix();

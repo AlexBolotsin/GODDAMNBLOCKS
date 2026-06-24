@@ -211,7 +211,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         sprite.mesh = spriteMesh;
         sprite.material = sharedMaterial;
         sprite.isBillboardActor = true;
-        sprite.castsProjectedShadow = false;
+        sprite.castsProjectedShadow = true;
         sprite.transform.SetPosition(-2.8f + i * 2.8f, 0.45f, -3.4f);
         sprite.transform.SetScale(1.1f, 1.5f, 1.0f);
         sprite.tint = vec4(

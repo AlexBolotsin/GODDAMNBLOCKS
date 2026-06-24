@@ -55,6 +55,8 @@ target_link_libraries(MazeGame PRIVATE
     dxgi.lib
     d3dcompiler.lib
     dxguid.lib
+    windowscodecs.lib
+    ole32.lib
 )
  
 # ---------------------------------------------------------------

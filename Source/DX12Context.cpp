@@ -513,7 +513,6 @@ void DX12Context::RenderScene(Scene* scene)
     FrameCameraData frameData;
     frameData.viewMatrix = BuildLookAtRH(m_cameraEye, m_cameraTarget, vec3(0.0f, 1.0f, 0.0f));
     frameData.projMatrix = BuildPerspectiveRH(1.0471976f, aspect, 0.1f, 100.0f);
-    frameData.cameraPosition = vec4(m_cameraEye.x, m_cameraEye.y, m_cameraEye.z, 1.0f);
 
     for (auto& entity : scene->GetEntities())
     {
@@ -552,7 +551,7 @@ void DX12Context::RenderScene(Scene* scene)
     for (size_t i = 1; i < scene->GetEntities().size(); ++i)
     {
         Entity* entity = scene->GetEntities()[i].get();
-        if (!entity || !entity->castsProjectedShadow)
+        if (!entity || entity->isBillboardActor || !entity->castsProjectedShadow)
             continue;
 
         const mat4 objectWorld = entity->transform.GetWorldMatrix();

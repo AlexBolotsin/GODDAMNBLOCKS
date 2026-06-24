@@ -9,7 +9,6 @@ struct FrameCameraData
 {
     mat4 viewMatrix;
     mat4 projMatrix;
-    vec4 cameraPosition;
 };
 
 class Entity
@@ -25,6 +24,8 @@ public:
     bool enabled = true;
     bool isBillboardActor = false;
     bool castsProjectedShadow = true;
+    bool usesSpriteTexture = false;
+    vec4 spriteUVRect = vec4(0.0f, 0.0f, 1.0f, 1.0f);
 
     void Draw(
         ID3D12GraphicsCommandList* commandList,

@@ -9,6 +9,13 @@ struct vec3
     vec3(float x, float y, float z) : x(x), y(y), z(z) {}
 };
 
+struct vec2
+{
+    float x, y;
+    vec2() : x(0), y(0) {}
+    vec2(float x, float y) : x(x), y(y) {}
+};
+
 struct vec4
 {
     float x, y, z, w;

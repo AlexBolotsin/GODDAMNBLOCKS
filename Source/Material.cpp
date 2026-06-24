@@ -1,19 +1,146 @@
 #include "Material.h"
 #include <d3dcompiler.h>
 #include <cstring>
+#include <wincodec.h>
+#include <vector>
+
+namespace
+{
+    void ReportMaterialInitFailure(const char* message)
+    {
+        OutputDebugStringA(message);
+        OutputDebugStringA("\n");
+    }
+
+    struct LoadedTextureData
+    {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        std::vector<uint8_t> pixels;
+    };
+
+    bool LoadTexturePixelsWIC(const wchar_t* texturePath, LoadedTextureData& outTexture)
+    {
+        if (!texturePath)
+        {
+            outTexture.width = 1;
+            outTexture.height = 1;
+            outTexture.pixels = { 255, 255, 255, 255 };
+            return true;
+        }
+
+        const HRESULT initHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const bool shouldUninitialize = SUCCEEDED(initHr);
+        if (FAILED(initHr) && initHr != RPC_E_CHANGED_MODE)
+            return false;
+
+        Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
+        Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
+        Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+        Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
+
+        HRESULT hr = CoCreateInstance(
+            CLSID_WICImagingFactory,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&factory));
+        if (FAILED(hr))
+        {
+            if (shouldUninitialize)
+                CoUninitialize();
+            return false;
+        }
+
+        hr = factory->CreateDecoderFromFilename(texturePath, nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder);
+        if (FAILED(hr))
+        {
+            OutputDebugStringW(L"LoadTexturePixelsWIC: CreateDecoderFromFilename failed\n");
+            if (shouldUninitialize)
+                CoUninitialize();
+            return false;
+        }
+
+        hr = decoder->GetFrame(0, &frame);
+        if (FAILED(hr))
+        {
+            if (shouldUninitialize)
+                CoUninitialize();
+            return false;
+        }
+
+        hr = factory->CreateFormatConverter(&converter);
+        if (FAILED(hr))
+        {
+            if (shouldUninitialize)
+                CoUninitialize();
+            return false;
+        }
+
+        hr = converter->Initialize(
+            frame.Get(),
+            GUID_WICPixelFormat32bppRGBA,
+            WICBitmapDitherTypeNone,
+            nullptr,
+            0.0,
+            WICBitmapPaletteTypeCustom);
+        if (FAILED(hr))
+        {
+            if (shouldUninitialize)
+                CoUninitialize();
+            return false;
+        }
+
+        UINT width = 0;
+        UINT height = 0;
+        hr = converter->GetSize(&width, &height);
+        if (FAILED(hr) || width == 0 || height == 0)
+        {
+            if (shouldUninitialize)
+                CoUninitialize();
+            return false;
+        }
+
+        outTexture.width = width;
+        outTexture.height = height;
+        outTexture.pixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4ull);
+
+        hr = converter->CopyPixels(nullptr, width * 4, static_cast<UINT>(outTexture.pixels.size()), outTexture.pixels.data());
+        if (shouldUninitialize)
+            CoUninitialize();
+
+        return SUCCEEDED(hr);
+    }
+}
 
 Material::~Material()
 {
     Shutdown();
 }
 
-bool Material::Init(ID3D12Device* device)
+bool Material::Init(ID3D12Device* device, ID3D12CommandQueue* commandQueue, const wchar_t* texturePath)
 {
+    m_lastInitFailureStage = InitFailureStage::None;
+
     if (!CreateRootSignature(device))
+    {
+        m_lastInitFailureStage = InitFailureStage::RootSignature;
+        ReportMaterialInitFailure("Material::Init failed in CreateRootSignature");
         return false;
+    }
+
+    if (!CreateTextureResources(device, commandQueue, texturePath))
+    {
+        m_lastInitFailureStage = InitFailureStage::TextureResources;
+        ReportMaterialInitFailure("Material::Init failed in CreateTextureResources");
+        return false;
+    }
 
     if (!CreatePipelineState(device))
+    {
+        m_lastInitFailureStage = InitFailureStage::PipelineState;
+        ReportMaterialInitFailure("Material::Init failed in CreatePipelineState");
         return false;
+    }
     
     return true;
 }
@@ -24,14 +151,19 @@ void Material::Shutdown()
         m_pipelineState.Reset();
     if (m_rootSignature)
         m_rootSignature.Reset();
+    if (m_srvHeap)
+        m_srvHeap.Reset();
+    if (m_texture)
+        m_texture.Reset();
 }
 
 bool Material::CreateRootSignature(ID3D12Device* device)
 {
-    D3D12_ROOT_PARAMETER rootParams[2] = {};
+    D3D12_ROOT_PARAMETER rootParams[3] = {};
+    D3D12_DESCRIPTOR_RANGE descriptorRanges[1] = {};
 
     D3D12_ROOT_CONSTANTS perFrameConstants = {};
-    perFrameConstants.Num32BitValues = 16 + 16 + 4; // view + projection + camera position
+    perFrameConstants.Num32BitValues = 16 + 16; // view + projection
     perFrameConstants.ShaderRegister = 0;
     perFrameConstants.RegisterSpace = 0;
 
@@ -40,7 +172,7 @@ bool Material::CreateRootSignature(ID3D12Device* device)
     rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_CONSTANTS perObjectConstants = {};
-    perObjectConstants.Num32BitValues = 16 + 4 + 4; // world + tint + render params
+    perObjectConstants.Num32BitValues = 16 + 4 + 4 + 4; // world + tint + render params + sprite uv rect
     perObjectConstants.ShaderRegister = 1;
     perObjectConstants.RegisterSpace = 0;
 
@@ -48,11 +180,37 @@ bool Material::CreateRootSignature(ID3D12Device* device)
     rootParams[1].Constants = perObjectConstants;
     rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
+    descriptorRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    descriptorRanges[0].NumDescriptors = 1;
+    descriptorRanges[0].BaseShaderRegister = 0;
+    descriptorRanges[0].RegisterSpace = 0;
+    descriptorRanges[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[2].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[2].DescriptorTable.pDescriptorRanges = descriptorRanges;
+    rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC staticSampler = {};
+    staticSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    staticSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSampler.MipLODBias = 0.0f;
+    staticSampler.MaxAnisotropy = 1;
+    staticSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    staticSampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+    staticSampler.MinLOD = 0.0f;
+    staticSampler.MaxLOD = D3D12_FLOAT32_MAX;
+    staticSampler.ShaderRegister = 0;
+    staticSampler.RegisterSpace = 0;
+    staticSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
     D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
-    rootSigDesc.NumParameters = 2;
+    rootSigDesc.NumParameters = 3;
     rootSigDesc.pParameters = rootParams;
-    rootSigDesc.NumStaticSamplers = 0;
-    rootSigDesc.pStaticSamplers = nullptr;
+    rootSigDesc.NumStaticSamplers = 1;
+    rootSigDesc.pStaticSamplers = &staticSampler;
     rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     Microsoft::WRL::ComPtr<ID3DBlob> serializedRootSig;
@@ -68,7 +226,10 @@ bool Material::CreateRootSignature(ID3D12Device* device)
     }
 
     if (FAILED(device->CreateRootSignature(0, serializedRootSig->GetBufferPointer(), serializedRootSig->GetBufferSize(), IID_PPV_ARGS(&m_rootSignature))))
+    {
+        ReportMaterialInitFailure("CreateRootSignature: device->CreateRootSignature failed");
         return false;
+    }
 
     return true;
 }
@@ -83,7 +244,6 @@ cbuffer PerObject : register(b0)
 {
     row_major float4x4 viewMatrix;
     row_major float4x4 projMatrix;
-    float4 cameraPosition;
 };
 
 cbuffer PerDraw : register(b1)
@@ -91,13 +251,18 @@ cbuffer PerDraw : register(b1)
     row_major float4x4 worldMatrix;
     float4 tintColor;
     float4 renderParams;
+    float4 spriteUVRect;
 };
+
+Texture2D spriteTexture : register(t0);
+SamplerState spriteSampler : register(s0);
 
 struct VSInput
 {
     float3 position : POSITION;
     float3 normal   : NORMAL;
     float4 color    : COLOR;
+    float2 uv       : TEXCOORD0;
 };
 
 struct PSInput
@@ -107,7 +272,19 @@ struct PSInput
     float3 worldPos : TEXCOORD0;
     float3 normalWS : TEXCOORD1;
     float2 clipYW   : TEXCOORD2;
+    float2 uv       : TEXCOORD3;
+    float3 viewPos  : TEXCOORD4;
 };
+
+float SampleSpriteAlpha(in float2 uv, out float3 color)
+{
+    float4 texel = spriteTexture.Sample(spriteSampler, uv);
+    float3 chromaKey = float3(34.0f / 255.0f, 177.0f / 255.0f, 76.0f / 255.0f);
+    float chromaDistance = distance(texel.rgb, chromaKey);
+    float alpha = texel.a * smoothstep(0.10f, 0.16f, chromaDistance);
+    color = texel.rgb;
+    return alpha;
+}
 
 PSInput VSMain(VSInput input)
 {
@@ -118,6 +295,8 @@ PSInput VSMain(VSInput input)
     output.color = tintColor;
     output.worldPos = worldPos.xyz;
     output.clipYW = float2(output.position.y, output.position.w);
+    output.uv = input.uv;
+    output.viewPos = viewPos.xyz;
 
     output.normalWS = normalize(mul(float4(input.normal, 0.0f), worldMatrix).xyz);
 
@@ -128,13 +307,44 @@ float4 PSMain(PSInput input) : SV_TARGET
 {
     if (renderParams.x > 0.5f)
     {
-        float cameraDistance = distance(input.worldPos, cameraPosition.xyz);
+        if (renderParams.y > 0.5f)
+        {
+            float2 spriteUv = lerp(spriteUVRect.xy, spriteUVRect.zw, input.uv);
+            float3 spriteColor;
+            float spriteAlpha = SampleSpriteAlpha(spriteUv, spriteColor);
+            clip(spriteAlpha - 0.05f);
+        }
+
+        float cameraDistance = length(input.viewPos);
         float fogStart = 8.0f;
         float fogEnd = 22.0f;
         float fogFactor = saturate((cameraDistance - fogStart) / (fogEnd - fogStart));
 
         float alpha = input.color.a * (1.0f - fogFactor * 0.5f);
         return float4(0.0f, 0.0f, 0.0f, alpha);
+    }
+
+    if (renderParams.y > 0.5f)
+    {
+        float2 spriteUv = lerp(spriteUVRect.xy, spriteUVRect.zw, input.uv);
+        float3 sampledSpriteColor;
+        float spriteAlpha = SampleSpriteAlpha(spriteUv, sampledSpriteColor);
+        clip(spriteAlpha - 0.05f);
+
+        float cameraDistance = length(input.viewPos);
+        float fogStart = 8.0f;
+        float fogEnd = 22.0f;
+        float fogFactor = saturate((cameraDistance - fogStart) / (fogEnd - fogStart));
+
+        float ndcY = input.clipYW.x / max(abs(input.clipYW.y), 1e-4f);
+        float skyT = saturate(ndcY * 0.5f + 0.5f);
+        float3 skyHorizon = float3(0.64f, 0.70f, 0.78f);
+        float3 skyZenith = float3(0.24f, 0.38f, 0.62f);
+        float3 fogColor = lerp(skyHorizon, skyZenith, skyT);
+
+        float3 spriteColor = sampledSpriteColor * input.color.rgb;
+        float3 finalSpriteColor = lerp(spriteColor, fogColor, fogFactor * 0.35f);
+        return float4(saturate(finalSpriteColor), spriteAlpha * input.color.a);
     }
 
     float3 normalWS = normalize(input.normalWS);
@@ -172,7 +382,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 fillToLight = normalize(float3(-0.45f, 0.70f, -0.55f));
     float3 fillColor = float3(0.42f, 0.54f, 0.78f);
 
-    float3 viewDir = normalize(cameraPosition.xyz - input.worldPos);
+    float3 viewDir = normalize(-input.viewPos);
 
     float3 ambientColor = float3(0.20f, 0.21f, 0.23f);
     float keyDiffuse = saturate(dot(normalWS, keyToLight));
@@ -189,7 +399,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     litColor *= (1.0f - edgeBand * 0.14f);
     litColor = min(litColor, float3(1.0f, 1.0f, 1.0f));
 
-    float cameraDistance = distance(input.worldPos, cameraPosition.xyz);
+    float cameraDistance = length(input.viewPos);
     float fogStart = 8.0f;
     float fogEnd = 22.0f;
     float fogFactor = saturate((cameraDistance - fogStart) / (fogEnd - fogStart));
@@ -231,6 +441,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     {
         if (errorBlob)
             OutputDebugStringA(static_cast<const char*>(errorBlob->GetBufferPointer()));
+        ReportMaterialInitFailure("CreatePipelineState: VS compile failed");
         return false;
     }
 
@@ -251,6 +462,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     {
         if (errorBlob)
             OutputDebugStringA(static_cast<const char*>(errorBlob->GetBufferPointer()));
+        ReportMaterialInitFailure("CreatePipelineState: PS compile failed");
         return false;
     }
 
@@ -258,6 +470,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 40, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
 
     D3D12_BLEND_DESC blendDesc = {};
@@ -316,7 +529,175 @@ float4 PSMain(PSInput input) : SV_TARGET
     psoDesc.SampleDesc.Quality = 0;
 
     if (FAILED(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_pipelineState))))
+    {
+        ReportMaterialInitFailure("CreatePipelineState: device->CreateGraphicsPipelineState failed");
         return false;
+    }
+
+    return true;
+}
+
+bool Material::CreateTextureResources(ID3D12Device* device, ID3D12CommandQueue* commandQueue, const wchar_t* texturePath)
+{
+    if (!device || !commandQueue)
+    {
+        ReportMaterialInitFailure("CreateTextureResources: device or commandQueue was null");
+        return false;
+    }
+
+    LoadedTextureData textureData;
+    if (!LoadTexturePixelsWIC(texturePath, textureData))
+    {
+        ReportMaterialInitFailure("CreateTextureResources: LoadTexturePixelsWIC failed");
+        return false;
+    }
+
+    D3D12_RESOURCE_DESC textureDesc = {};
+    textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    textureDesc.Alignment = 0;
+    textureDesc.Width = textureData.width;
+    textureDesc.Height = textureData.height;
+    textureDesc.DepthOrArraySize = 1;
+    textureDesc.MipLevels = 1;
+    textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    textureDesc.SampleDesc.Count = 1;
+    textureDesc.SampleDesc.Quality = 0;
+    textureDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    textureDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    D3D12_HEAP_PROPERTIES defaultHeap = {};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    if (FAILED(device->CreateCommittedResource(
+        &defaultHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &textureDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr,
+        IID_PPV_ARGS(&m_texture))))
+    {
+        return false;
+    }
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+    UINT numRows = 0;
+    UINT64 rowSizeInBytes = 0;
+    UINT64 uploadSize = 0;
+    device->GetCopyableFootprints(&textureDesc, 0, 1, 0, &footprint, &numRows, &rowSizeInBytes, &uploadSize);
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer;
+    D3D12_RESOURCE_DESC uploadDesc = {};
+    uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    uploadDesc.Width = uploadSize;
+    uploadDesc.Height = 1;
+    uploadDesc.DepthOrArraySize = 1;
+    uploadDesc.MipLevels = 1;
+    uploadDesc.Format = DXGI_FORMAT_UNKNOWN;
+    uploadDesc.SampleDesc.Count = 1;
+    uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    D3D12_HEAP_PROPERTIES uploadHeap = {};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    if (FAILED(device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&uploadBuffer))))
+    {
+        return false;
+    }
+
+    uint8_t* mappedData = nullptr;
+    if (FAILED(uploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mappedData))))
+        return false;
+
+    const size_t sourceRowPitch = static_cast<size_t>(textureData.width) * 4ull;
+    for (UINT row = 0; row < numRows; ++row)
+    {
+        memcpy(
+            mappedData + footprint.Offset + static_cast<size_t>(row) * footprint.Footprint.RowPitch,
+            textureData.pixels.data() + static_cast<size_t>(row) * sourceRowPitch,
+            sourceRowPitch);
+    }
+    uploadBuffer->Unmap(0, nullptr);
+
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> commandAllocator;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
+    if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&commandAllocator))))
+        return false;
+    if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, commandAllocator.Get(), nullptr, IID_PPV_ARGS(&commandList))))
+        return false;
+
+    D3D12_TEXTURE_COPY_LOCATION dstLocation = {};
+    dstLocation.pResource = m_texture.Get();
+    dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dstLocation.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION srcLocation = {};
+    srcLocation.pResource = uploadBuffer.Get();
+    srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    srcLocation.PlacedFootprint = footprint;
+
+    commandList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, nullptr);
+
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = m_texture.Get();
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    commandList->ResourceBarrier(1, &barrier);
+
+    if (FAILED(commandList->Close()))
+        return false;
+
+    ID3D12CommandList* commandLists[] = { commandList.Get() };
+    commandQueue->ExecuteCommandLists(1, commandLists);
+
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+    if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
+        return false;
+
+    HANDLE fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (!fenceEvent)
+        return false;
+
+    const UINT64 fenceValue = 1;
+    if (FAILED(commandQueue->Signal(fence.Get(), fenceValue)))
+    {
+        CloseHandle(fenceEvent);
+        return false;
+    }
+
+    if (fence->GetCompletedValue() < fenceValue)
+    {
+        if (FAILED(fence->SetEventOnCompletion(fenceValue, fenceEvent)))
+        {
+            CloseHandle(fenceEvent);
+            return false;
+        }
+
+        WaitForSingleObject(fenceEvent, INFINITE);
+    }
+
+    CloseHandle(fenceEvent);
+
+    D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+    heapDesc.NumDescriptors = 1;
+    heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_srvHeap))))
+        return false;
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(m_texture.Get(), &srvDesc, m_srvHeap->GetCPUDescriptorHandleForHeapStart());
 
     return true;
 }

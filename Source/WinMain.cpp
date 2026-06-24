@@ -8,6 +8,36 @@
 #include <chrono>
 #include <cmath>
 #include <vector>
+#include <filesystem>
+#include <string>
+#include <fstream>
+
+namespace
+{
+    void DebugStageLog(const char* message)
+    {
+        std::ofstream logFile("runtime_trace.log", std::ios::app);
+        logFile << message << "\n";
+    }
+
+    std::wstring GetSpriteSheetPath()
+    {
+        wchar_t modulePath[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
+        std::filesystem::path path(modulePath);
+        path = path.parent_path().parent_path().parent_path() / "Sprites" / "19338.png";
+        return path.wstring();
+    }
+
+    vec4 MakeAtlasRect(float x, float y, float width, float height, float textureWidth, float textureHeight)
+    {
+        return vec4(
+            x / textureWidth,
+            y / textureHeight,
+            (x + width) / textureWidth,
+            (y + height) / textureHeight);
+    }
+}
 
 // Helper: Create a simple cube mesh
 std::shared_ptr<Mesh> CreateCubeMesh(ID3D12Device* device)
@@ -95,10 +125,10 @@ std::shared_ptr<Mesh> CreateSpriteQuadMesh(ID3D12Device* device)
 {
     std::vector<Vertex> vertices =
     {
-        { vec3(-0.5f, -0.5f, 0.0f), vec3(0, 0, 1), vec4(1, 1, 1, 1) },
-        { vec3(0.5f, -0.5f, 0.0f),  vec3(0, 0, 1), vec4(1, 1, 1, 1) },
-        { vec3(0.5f, 0.5f, 0.0f),   vec3(0, 0, 1), vec4(1, 1, 1, 1) },
-        { vec3(-0.5f, 0.5f, 0.0f),  vec3(0, 0, 1), vec4(1, 1, 1, 1) },
+        { vec3(-0.5f, -0.5f, 0.0f), vec3(0, 0, 1), vec4(1, 1, 1, 1), vec2(0.0f, 1.0f) },
+        { vec3(0.5f, -0.5f, 0.0f),  vec3(0, 0, 1), vec4(1, 1, 1, 1), vec2(1.0f, 1.0f) },
+        { vec3(0.5f, 0.5f, 0.0f),   vec3(0, 0, 1), vec4(1, 1, 1, 1), vec2(1.0f, 0.0f) },
+        { vec3(-0.5f, 0.5f, 0.0f),  vec3(0, 0, 1), vec4(1, 1, 1, 1), vec2(0.0f, 0.0f) },
     };
 
     std::vector<uint32_t> indices =
@@ -117,6 +147,8 @@ std::shared_ptr<Mesh> CreateSpriteQuadMesh(ID3D12Device* device)
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
 {
+    DebugStageLog("WinMain start");
+
     // Setup window
     WindowDesc desc;
     desc.title = L"MazeGame";
@@ -167,11 +199,31 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     }
 
     auto sharedMaterial = std::make_shared<Material>();
-    if (!sharedMaterial->Init(dx12.GetDevice()))
+    if (!sharedMaterial->Init(dx12.GetDevice(), dx12.GetCommandQueue()))
     {
-        MessageBoxW(nullptr, L"Failed to initialize shared material.", L"Material Error", MB_OK | MB_ICONERROR);
+        const Material::InitFailureStage stage = sharedMaterial->GetLastInitFailureStage();
+        const wchar_t* message = L"Failed to initialize shared material.";
+        int exitCode = -2;
+
+        if (stage == Material::InitFailureStage::RootSignature)
+        {
+            message = L"Shared material failed in CreateRootSignature.";
+            exitCode = -20;
+        }
+        else if (stage == Material::InitFailureStage::TextureResources)
+        {
+            message = L"Shared material failed in CreateTextureResources.";
+            exitCode = -21;
+        }
+        else if (stage == Material::InitFailureStage::PipelineState)
+        {
+            message = L"Shared material failed in CreatePipelineState.";
+            exitCode = -22;
+        }
+
+        MessageBoxW(nullptr, message, L"Material Error", MB_OK | MB_ICONERROR);
         dx12.Shutdown();
-        return -1;
+        return exitCode;
     }
 
     Entity& ground = scene.CreateEntity();
@@ -211,7 +263,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         sprite.mesh = spriteMesh;
         sprite.material = sharedMaterial;
         sprite.isBillboardActor = true;
-        sprite.castsProjectedShadow = true;
+        sprite.castsProjectedShadow = false;
+        sprite.usesSpriteTexture = false;
         sprite.transform.SetPosition(-2.8f + i * 2.8f, 0.45f, -3.4f);
         sprite.transform.SetScale(1.1f, 1.5f, 1.0f);
         sprite.tint = vec4(
@@ -227,6 +280,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     const auto startTime = std::chrono::steady_clock::now();
     while (running)
     {
+        DebugStageLog("Frame begin loop");
         if (!window.PumpMessages())
         {
             running = false;
@@ -282,9 +336,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
             camTarget.z + sinf(camAngle) * camRadius);
         dx12.SetCamera(camPos, camTarget);
 
+        DebugStageLog("Before BeginFrame");
         dx12.BeginFrame();
+        DebugStageLog("Before RenderScene");
         dx12.RenderScene(&scene);
+        DebugStageLog("Before EndFrame");
         dx12.EndFrame();
+        DebugStageLog("After EndFrame");
     }
 
     dx12.Shutdown();

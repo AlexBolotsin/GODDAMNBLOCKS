@@ -29,11 +29,6 @@ namespace
             return true;
         }
 
-        const HRESULT initHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        const bool shouldUninitialize = SUCCEEDED(initHr);
-        if (FAILED(initHr) && initHr != RPC_E_CHANGED_MODE)
-            return false;
-
         Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
         Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
         Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
@@ -46,8 +41,6 @@ namespace
             IID_PPV_ARGS(&factory));
         if (FAILED(hr))
         {
-            if (shouldUninitialize)
-                CoUninitialize();
             return false;
         }
 
@@ -55,24 +48,18 @@ namespace
         if (FAILED(hr))
         {
             OutputDebugStringW(L"LoadTexturePixelsWIC: CreateDecoderFromFilename failed\n");
-            if (shouldUninitialize)
-                CoUninitialize();
             return false;
         }
 
         hr = decoder->GetFrame(0, &frame);
         if (FAILED(hr))
         {
-            if (shouldUninitialize)
-                CoUninitialize();
             return false;
         }
 
         hr = factory->CreateFormatConverter(&converter);
         if (FAILED(hr))
         {
-            if (shouldUninitialize)
-                CoUninitialize();
             return false;
         }
 
@@ -85,8 +72,6 @@ namespace
             WICBitmapPaletteTypeCustom);
         if (FAILED(hr))
         {
-            if (shouldUninitialize)
-                CoUninitialize();
             return false;
         }
 
@@ -95,8 +80,6 @@ namespace
         hr = converter->GetSize(&width, &height);
         if (FAILED(hr) || width == 0 || height == 0)
         {
-            if (shouldUninitialize)
-                CoUninitialize();
             return false;
         }
 
@@ -105,8 +88,6 @@ namespace
         outTexture.pixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4ull);
 
         hr = converter->CopyPixels(nullptr, width * 4, static_cast<UINT>(outTexture.pixels.size()), outTexture.pixels.data());
-        if (shouldUninitialize)
-            CoUninitialize();
 
         return SUCCEEDED(hr);
     }

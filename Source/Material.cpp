@@ -173,29 +173,21 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 fillColor = float3(0.42f, 0.54f, 0.78f);
 
     float3 viewDir = normalize(cameraPosition.xyz - input.worldPos);
-    float3 keyHalfVec = normalize(keyToLight + viewDir);
 
     float3 ambientColor = float3(0.20f, 0.21f, 0.23f);
     float keyDiffuse = saturate(dot(normalWS, keyToLight));
     float fillDiffuse = saturate(dot(normalWS, fillToLight));
 
-    float keySpecular = pow(saturate(dot(normalWS, keyHalfVec)), 32.0f) * 0.35f;
-
-    float rim = pow(1.0f - saturate(dot(normalWS, viewDir)), 3.0f);
-    rim *= 0.25f;
-    float3 rimColor = float3(0.55f, 0.65f, 0.90f);
-
-    // Cel-shading bands.
-    float keyBand = floor(saturate(keyDiffuse) * 4.0f) / 3.0f;
-    float fillBand = floor(saturate(fillDiffuse) * 3.0f) / 2.0f;
-    float specBand = floor(saturate(keySpecular * 2.6f) * 2.0f);
-    float rimBand = floor(saturate(rim * 4.0f) * 2.0f);
+    float keyBand = keyDiffuse;
+    float fillBand = fillDiffuse;
+    float ndotv = saturate(dot(normalWS, viewDir));
+    float edgeBand = smoothstep(0.62f, 0.90f, 1.0f - ndotv);
 
     // Keep a tiny floor for readability so fully unlit areas are not crushed to black.
     float3 diffuseLighting = keyColor * (0.10f + keyBand * 0.75f) + fillColor * (fillBand * 0.30f);
     float3 litColor = baseColor * (ambientColor + diffuseLighting);
-    litColor += float3(specBand, specBand, specBand) * 0.30f;
-    litColor += rimColor * (rimBand * 0.30f);
+    litColor *= (1.0f - edgeBand * 0.14f);
+    litColor = min(litColor, float3(1.0f, 1.0f, 1.0f));
 
     float cameraDistance = distance(input.worldPos, cameraPosition.xyz);
     float fogStart = 8.0f;
@@ -209,7 +201,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 skyZenith = float3(0.24f, 0.38f, 0.62f);
     float3 fogColor = lerp(skyHorizon, skyZenith, skyT);
 
-    float3 finalColor = lerp(litColor, fogColor, fogFactor);
+    float3 finalColor = saturate(lerp(litColor, fogColor, fogFactor));
     return float4(finalColor, input.color.a);
 }
 )";

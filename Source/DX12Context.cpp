@@ -107,6 +107,45 @@ namespace
 
         return shadow;
     }
+
+    mat4 BuildBillboardWorld(const vec3& position, const vec3& scale, const vec3& cameraEye)
+    {
+        vec3 toCamera = Vec3Normalize(Vec3Sub(cameraEye, position));
+        if (toCamera.x == 0.0f && toCamera.y == 0.0f && toCamera.z == 0.0f)
+            toCamera = vec3(0.0f, 0.0f, 1.0f);
+
+        const vec3 worldUp(0.0f, 1.0f, 0.0f);
+        vec3 right = Vec3Cross(worldUp, toCamera);
+        if (Vec3Dot(right, right) <= 1e-8f)
+            right = vec3(1.0f, 0.0f, 0.0f);
+        else
+            right = Vec3Normalize(right);
+
+        vec3 up = Vec3Normalize(Vec3Cross(toCamera, right));
+
+        mat4 world;
+        world.m[0] = right.x * scale.x;
+        world.m[1] = right.y * scale.x;
+        world.m[2] = right.z * scale.x;
+        world.m[3] = 0.0f;
+
+        world.m[4] = up.x * scale.y;
+        world.m[5] = up.y * scale.y;
+        world.m[6] = up.z * scale.y;
+        world.m[7] = 0.0f;
+
+        world.m[8] = toCamera.x * scale.z;
+        world.m[9] = toCamera.y * scale.z;
+        world.m[10] = toCamera.z * scale.z;
+        world.m[11] = 0.0f;
+
+        world.m[12] = position.x;
+        world.m[13] = position.y;
+        world.m[14] = position.z;
+        world.m[15] = 1.0f;
+
+        return world;
+    }
 }
 
 void DX12Context::SetCamera(const vec3& eye, const vec3& target)
@@ -478,6 +517,16 @@ void DX12Context::RenderScene(Scene* scene)
 
     for (auto& entity : scene->GetEntities())
     {
+        if (!entity)
+            continue;
+
+        if (entity->isBillboardActor)
+        {
+            const mat4 billboardWorld = BuildBillboardWorld(entity->transform.position, entity->transform.scale, m_cameraEye);
+            entity->Draw(m_commandList.Get(), frameData, &billboardWorld, nullptr, false);
+            continue;
+        }
+
         entity->Draw(m_commandList.Get(), frameData);
     }
 
@@ -503,7 +552,7 @@ void DX12Context::RenderScene(Scene* scene)
     for (size_t i = 1; i < scene->GetEntities().size(); ++i)
     {
         Entity* entity = scene->GetEntities()[i].get();
-        if (!entity)
+        if (!entity || entity->isBillboardActor || !entity->castsProjectedShadow)
             continue;
 
         const mat4 objectWorld = entity->transform.GetWorldMatrix();

@@ -7,6 +7,7 @@
 #include <memory>
 #include <chrono>
 #include <cmath>
+#include <vector>
 
 // Helper: Create a simple cube mesh
 std::shared_ptr<Mesh> CreateCubeMesh(ID3D12Device* device)
@@ -90,6 +91,30 @@ std::shared_ptr<Mesh> CreateGroundPlaneMesh(ID3D12Device* device)
     return mesh;
 }
 
+std::shared_ptr<Mesh> CreateSpriteQuadMesh(ID3D12Device* device)
+{
+    std::vector<Vertex> vertices =
+    {
+        { vec3(-0.5f, -0.5f, 0.0f), vec3(0, 0, 1), vec4(1, 1, 1, 1) },
+        { vec3(0.5f, -0.5f, 0.0f),  vec3(0, 0, 1), vec4(1, 1, 1, 1) },
+        { vec3(0.5f, 0.5f, 0.0f),   vec3(0, 0, 1), vec4(1, 1, 1, 1) },
+        { vec3(-0.5f, 0.5f, 0.0f),  vec3(0, 0, 1), vec4(1, 1, 1, 1) },
+    };
+
+    std::vector<uint32_t> indices =
+    {
+        // Front face
+        0, 1, 2,
+        0, 2, 3,
+    };
+
+    auto mesh = std::make_shared<Mesh>();
+    if (!mesh->Init(device, vertices, indices))
+        return nullptr;
+
+    return mesh;
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
 {
     // Setup window
@@ -132,8 +157,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     // Create shared mesh
     auto cubeMesh = CreateCubeMesh(dx12.GetDevice());
     auto groundMesh = CreateGroundPlaneMesh(dx12.GetDevice());
+    auto spriteMesh = CreateSpriteQuadMesh(dx12.GetDevice());
 
-    if (!cubeMesh || !groundMesh)
+    if (!cubeMesh || !groundMesh || !spriteMesh)
     {
         MessageBoxW(nullptr, L"Failed to create scene mesh.", L"Mesh Error", MB_OK | MB_ICONERROR);
         dx12.Shutdown();
@@ -155,6 +181,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     ground.transform.SetScale(12.0f, 1.0f, 12.0f);
     ground.tint = vec4(0.95f, 0.95f, 0.95f, 1.0f);
 
+    std::vector<Entity*> cubeActors;
+    cubeActors.reserve(3);
+
     // Create multiple cubes with different positions and colors
     for (int i = 0; i < 3; ++i)
     {
@@ -170,6 +199,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
             0.2f + ((i + 1) % 2) * 0.5f,
             1.0f
         );
+        cubeActors.push_back(&entity);
+    }
+
+    std::vector<Entity*> spriteActors;
+    spriteActors.reserve(3);
+
+    for (int i = 0; i < 3; ++i)
+    {
+        Entity& sprite = scene.CreateEntity();
+        sprite.mesh = spriteMesh;
+        sprite.material = sharedMaterial;
+        sprite.isBillboardActor = true;
+        sprite.castsProjectedShadow = false;
+        sprite.transform.SetPosition(-2.8f + i * 2.8f, 0.45f, -3.4f);
+        sprite.transform.SetScale(1.1f, 1.5f, 1.0f);
+        sprite.tint = vec4(
+            0.95f - i * 0.22f,
+            0.45f + i * 0.16f,
+            0.35f + i * 0.24f,
+            1.0f);
+        spriteActors.push_back(&sprite);
     }
 
     // -------------------- GAME LOOP -------------------
@@ -192,9 +242,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         const auto now = std::chrono::steady_clock::now();
         const float t = std::chrono::duration<float>(now - startTime).count();
 
-        for (size_t i = 1; i < scene.GetEntities().size(); ++i)
+        for (size_t i = 0; i < cubeActors.size(); ++i)
         {
-            Entity* entity = scene.GetEntities()[i].get();
+            Entity* entity = cubeActors[i];
             if (!entity)
                 continue;
 
@@ -207,6 +257,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
 
             const float angle = t * (0.7f + static_cast<float>(i) * 0.35f) + phase;
             entity->transform.SetRotation(QuatRotationAxis(vec3(0.0f, 1.0f, 0.0f), angle));
+        }
+
+        for (size_t i = 0; i < spriteActors.size(); ++i)
+        {
+            Entity* sprite = spriteActors[i];
+            if (!sprite)
+                continue;
+
+            const float phase = static_cast<float>(i) * 0.55f + 1.1f;
+            const float x = -2.8f + static_cast<float>(i) * 2.8f;
+            const float y = 0.45f + sinf(t * 1.45f + phase) * 0.18f;
+            const float z = -3.4f + cosf(t * 0.70f + phase) * 0.20f;
+            sprite->transform.SetPosition(x, y, z);
         }
 
         const float camAngle = t * 0.25f;

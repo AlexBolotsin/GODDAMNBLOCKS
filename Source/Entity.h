@@ -23,6 +23,8 @@ public:
     std::shared_ptr<Material> material;
     vec4 tint = vec4(1.0f, 1.0f, 1.0f, 1.0f);
     bool enabled = true;
+    bool isBillboardActor = false;
+    bool castsProjectedShadow = true;
 
     void Draw(
         ID3D12GraphicsCommandList* commandList,

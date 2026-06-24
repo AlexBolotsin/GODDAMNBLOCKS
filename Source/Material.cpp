@@ -185,10 +185,17 @@ float4 PSMain(PSInput input) : SV_TARGET
     rim *= 0.25f;
     float3 rimColor = float3(0.55f, 0.65f, 0.90f);
 
-    float3 diffuseLighting = keyColor * (keyDiffuse * 0.85f) + fillColor * (fillDiffuse * 0.40f);
+    // Cel-shading bands.
+    float keyBand = floor(saturate(keyDiffuse) * 4.0f) / 3.0f;
+    float fillBand = floor(saturate(fillDiffuse) * 3.0f) / 2.0f;
+    float specBand = floor(saturate(keySpecular * 2.6f) * 2.0f);
+    float rimBand = floor(saturate(rim * 4.0f) * 2.0f);
+
+    // Keep a tiny floor for readability so fully unlit areas are not crushed to black.
+    float3 diffuseLighting = keyColor * (0.10f + keyBand * 0.75f) + fillColor * (fillBand * 0.30f);
     float3 litColor = baseColor * (ambientColor + diffuseLighting);
-    litColor += float3(keySpecular, keySpecular, keySpecular);
-    litColor += rimColor * rim;
+    litColor += float3(specBand, specBand, specBand) * 0.30f;
+    litColor += rimColor * (rimBand * 0.30f);
 
     float cameraDistance = distance(input.worldPos, cameraPosition.xyz);
     float fogStart = 8.0f;

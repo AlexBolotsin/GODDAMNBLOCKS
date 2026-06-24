@@ -482,7 +482,8 @@ void DX12Context::RenderScene(Scene* scene)
     }
 
     // Projected soft shadows onto ground plane (index 0 entity).
-    const float groundPlaneY = -0.99f;
+    // Keep projected shadows slightly above the floor to avoid depth z-fighting.
+    const float groundPlaneY = -0.985f;
     const vec3 shadowRayDir = Vec3Normalize(vec3(-0.40f, -0.95f, -0.55f));
     const mat4 shadowProj = BuildDirectionalShadowProjection(groundPlaneY, shadowRayDir);
 
@@ -494,9 +495,9 @@ void DX12Context::RenderScene(Scene* scene)
     };
     const vec3 shadowOffsets[] =
     {
-        vec3(0.0f, 0.0f, 0.0f),
-        vec3(0.06f, 0.0f, 0.03f),
-        vec3(-0.05f, 0.0f, -0.02f),
+        vec3(0.0f, 0.0015f, 0.0f),
+        vec3(0.06f, 0.0030f, 0.03f),
+        vec3(-0.05f, 0.0045f, -0.02f),
     };
 
     for (size_t i = 1; i < scene->GetEntities().size(); ++i)

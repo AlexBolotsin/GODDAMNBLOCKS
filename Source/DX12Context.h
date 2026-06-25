@@ -5,10 +5,13 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <cstdint>
+#include <utility>
+#include <vector>
 #include "EngineMath.h"
 #include "Camera.h"
 
 class Scene;
+class Entity;
 
 class DX12Context
 {
@@ -47,6 +50,7 @@ private:
     bool CreateShadowMapResources();
     bool CreateShadowPipeline();
     bool CreateShadowSpritePipeline();
+    bool CreateInstancedSpritePipeline();
     bool CreatePostProcessResources();
     bool CreatePostProcessPipelines();
     void WaitForGpu();
@@ -77,6 +81,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_shadowRootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_shadowSpritePso;
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_shadowSpriteRootSig;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_instancedSpritePso;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_instancedSpriteRootSig;
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_spriteInstanceBuffer;
+    uint8_t*                                      m_spriteInstanceMapped = nullptr;
+    static constexpr uint32_t kMaxSpriteInstances = 5000;
+    std::vector<std::pair<float, const Entity*>> m_instanceSortBuf;
     mat4  m_lightViewProj;
     vec3  m_lightPos;
     float    m_fps              = 0.0f;

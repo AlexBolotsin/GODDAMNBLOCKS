@@ -29,6 +29,7 @@ public:
     bool castsProjectedShadow = true;
     bool usesSpriteTexture = false;
     bool isBlobShadow = false;
+    bool useInstancing = false;
     vec4 spriteUVRect = vec4(0.0f, 0.0f, 1.0f, 1.0f);
 
     std::vector<vec4> animFrames;

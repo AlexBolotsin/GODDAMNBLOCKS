@@ -271,6 +271,7 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
         sprite.tint                 = vec4(1.0f, 1.0f, 1.0f, 1.0f);
         sprite.animFrames           = kAnimSets[row];
         sprite.animTimer            = Rng() * 4.0f; // stagger starting frame
+        sprite.useInstancing        = true;
         m_bulkSpriteActors.push_back(&sprite);
     }
 

@@ -1,6 +1,7 @@
 #include "DX12Context.h"
 #include "Scene.h"
 #include "Camera.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -106,7 +107,35 @@ namespace
         OutputDebugStringA(buffer);
     }
 
-}
+    // Frustum plane: a*x + b*y + c*z + d > 0 means the point is on the inside.
+    struct FrustumPlane { float a, b, c, d; };
+
+    // Extract 6 planes from a combined view-proj matrix (row-major, row-vector convention).
+    // clip = worldPos_row * VP; inside iff -w<x<w, -w<y<w, 0<z<w (DX12 NDC).
+    void ExtractFrustumPlanes(const mat4& vp, FrustumPlane planes[6])
+    {
+        const float* m = vp.m; // m[row*4 + col]
+        // clip_x = px*m[0] + py*m[4] + pz*m[8]  + m[12]
+        // clip_y = px*m[1] + py*m[5] + pz*m[9]  + m[13]
+        // clip_z = px*m[2] + py*m[6] + pz*m[10] + m[14]
+        // clip_w = px*m[3] + py*m[7] + pz*m[11] + m[15]
+        planes[0] = { m[0]+m[3],  m[4]+m[7],  m[8]+m[11],  m[12]+m[15] }; // left
+        planes[1] = { m[3]-m[0],  m[7]-m[4],  m[11]-m[8],  m[15]-m[12] }; // right
+        planes[2] = { m[1]+m[3],  m[5]+m[7],  m[9]+m[11],  m[13]+m[15] }; // bottom
+        planes[3] = { m[3]-m[1],  m[7]-m[5],  m[11]-m[9],  m[15]-m[13] }; // top
+        planes[4] = { m[2],        m[6],        m[10],        m[14]       }; // near (DX z > 0)
+        planes[5] = { m[3]-m[2],  m[7]-m[6],  m[11]-m[10], m[15]-m[14] }; // far
+    }
+
+    bool PointInFrustum(const FrustumPlane planes[6], float px, float py, float pz)
+    {
+        for (int i = 0; i < 6; ++i)
+            if (planes[i].a * px + planes[i].b * py + planes[i].c * pz + planes[i].d <= 0.0f)
+                return false;
+        return true;
+    }
+
+} // anonymous namespace
 
 DX12Context::~DX12Context()
 {
@@ -194,6 +223,12 @@ bool DX12Context::Init(HWND hwnd, uint32_t width, uint32_t height)
     if (!CreateShadowSpritePipeline())
     {
         OutputDebugStringA("DX12Context::Init failed in CreateShadowSpritePipeline\n");
+        return false;
+    }
+
+    if (!CreateInstancedSpritePipeline())
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreateInstancedSpritePipeline\n");
         return false;
     }
 
@@ -936,6 +971,208 @@ void PSMain(PSInput input)
     return true;
 }
 
+bool DX12Context::CreateInstancedSpritePipeline()
+{
+    // VS reads per-instance world matrix + uvRect from a StructuredBuffer via SV_InstanceID.
+    // PS applies chroma-key clip and fog. No vertex buffer — geometry is procedural (SV_VertexID).
+    static const char* kShader = R"(
+cbuffer PerFrame : register(b0)
+{
+    row_major float4x4 viewMatrix;
+    row_major float4x4 projMatrix;
+    row_major float4x4 lightViewProjMatrix;
+    float3 cameraEyeWS;
+    float  _pad;
+};
+
+struct SpriteInstance
+{
+    row_major float4x4 world;
+    float4             uvRect;
+};
+StructuredBuffer<SpriteInstance> g_instances : register(t0);
+
+Texture2D    g_sprite  : register(t1);
+SamplerState g_sampler : register(s0);
+
+struct VSOut
+{
+    float4 pos   : SV_POSITION;
+    float2 uv    : TEXCOORD0;
+    float3 viewV : TEXCOORD1;
+};
+
+static const float3 kPos[6] = {
+    float3(-0.5f, -0.5f, 0.0f), float3( 0.5f, -0.5f, 0.0f), float3( 0.5f,  0.5f, 0.0f),
+    float3(-0.5f, -0.5f, 0.0f), float3( 0.5f,  0.5f, 0.0f), float3(-0.5f,  0.5f, 0.0f)
+};
+static const float2 kUV[6] = {
+    float2(0.0f, 1.0f), float2(1.0f, 1.0f), float2(1.0f, 0.0f),
+    float2(0.0f, 1.0f), float2(1.0f, 0.0f), float2(0.0f, 0.0f)
+};
+
+VSOut VSMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
+{
+    SpriteInstance inst = g_instances[iid];
+    float4 wp  = mul(float4(kPos[vid], 1.0f), inst.world);
+    float4 vp  = mul(wp, viewMatrix);
+    VSOut o;
+    o.pos  = mul(vp, projMatrix);
+    o.uv   = lerp(inst.uvRect.xy, inst.uvRect.zw, kUV[vid]);
+    o.viewV = vp.xyz;
+    return o;
+}
+
+float4 PSMain(VSOut i) : SV_TARGET
+{
+    float4 texel  = g_sprite.Sample(g_sampler, i.uv);
+    float3 chroma = float3(34.0f / 255.0f, 177.0f / 255.0f, 76.0f / 255.0f);
+    float  alpha  = texel.a * smoothstep(0.10f, 0.16f, distance(texel.rgb, chroma));
+    clip(alpha - 0.05f);
+    float  camDist   = length(i.viewV);
+    float  fogFactor = saturate((camDist - 8.0f) / (22.0f - 8.0f));
+    float3 fogColor  = float3(0.64f, 0.70f, 0.78f);
+    float3 rgb       = lerp(texel.rgb, fogColor, fogFactor * 0.35f);
+    return float4(saturate(rgb), alpha);
+}
+)";
+
+    UINT compileFlags = 0;
+#if defined(_DEBUG)
+    compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+
+    Microsoft::WRL::ComPtr<ID3DBlob> vsBlob, psBlob, errorBlob;
+    if (FAILED(D3DCompile(kShader, strlen(kShader), nullptr, nullptr, nullptr,
+                          "VSMain", "vs_5_0", compileFlags, 0, &vsBlob, &errorBlob)))
+    {
+        if (errorBlob) OutputDebugStringA(static_cast<const char*>(errorBlob->GetBufferPointer()));
+        return false;
+    }
+    errorBlob.Reset();
+    if (FAILED(D3DCompile(kShader, strlen(kShader), nullptr, nullptr, nullptr,
+                          "PSMain", "ps_5_0", compileFlags, 0, &psBlob, &errorBlob)))
+    {
+        if (errorBlob) OutputDebugStringA(static_cast<const char*>(errorBlob->GetBufferPointer()));
+        return false;
+    }
+
+    // Root sig:
+    //   Param 0: root CBV  b0 (ALL)    — perFrame constants
+    //   Param 1: root SRV  t0 (VERTEX) — instance StructuredBuffer (address set per-frame)
+    //   Param 2: desc table t1 (PIXEL) — sprite atlas (1 SRV)
+    D3D12_ROOT_PARAMETER rootParams[3] = {};
+
+    rootParams[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParams[0].Descriptor.ShaderRegister = 0;  // b0
+    rootParams[0].Descriptor.RegisterSpace  = 0;
+    rootParams[0].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
+
+    rootParams[1].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    rootParams[1].Descriptor.ShaderRegister = 0;  // t0
+    rootParams[1].Descriptor.RegisterSpace  = 0;
+    rootParams[1].ShaderVisibility          = D3D12_SHADER_VISIBILITY_VERTEX;
+
+    D3D12_DESCRIPTOR_RANGE spriteRange = {};
+    spriteRange.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    spriteRange.NumDescriptors     = 1;
+    spriteRange.BaseShaderRegister = 1;  // t1
+    spriteRange.RegisterSpace      = 0;
+    spriteRange.OffsetInDescriptorsFromTableStart = 0;
+
+    rootParams[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[2].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[2].DescriptorTable.pDescriptorRanges   = &spriteRange;
+    rootParams[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC staticSampler = {};
+    staticSampler.Filter           = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+    staticSampler.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSampler.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSampler.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSampler.ComparisonFunc   = D3D12_COMPARISON_FUNC_NEVER;
+    staticSampler.MaxLOD           = D3D12_FLOAT32_MAX;
+    staticSampler.ShaderRegister   = 0;  // s0
+    staticSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
+    rootSigDesc.NumParameters     = 3;
+    rootSigDesc.pParameters       = rootParams;
+    rootSigDesc.NumStaticSamplers = 1;
+    rootSigDesc.pStaticSamplers   = &staticSampler;
+    rootSigDesc.Flags             = D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS
+                                  | D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS
+                                  | D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
+
+    Microsoft::WRL::ComPtr<ID3DBlob> serializedSig;
+    if (FAILED(D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+                                           &serializedSig, &errorBlob)))
+    {
+        if (errorBlob) OutputDebugStringA(static_cast<const char*>(errorBlob->GetBufferPointer()));
+        return false;
+    }
+    if (FAILED(m_device->CreateRootSignature(0, serializedSig->GetBufferPointer(),
+                                              serializedSig->GetBufferSize(),
+                                              IID_PPV_ARGS(&m_instancedSpriteRootSig))))
+        return false;
+
+    D3D12_RASTERIZER_DESC rastDesc = {};
+    rastDesc.FillMode        = D3D12_FILL_MODE_SOLID;
+    rastDesc.CullMode        = D3D12_CULL_MODE_NONE;
+    rastDesc.DepthClipEnable = TRUE;
+
+    D3D12_DEPTH_STENCIL_DESC dsDesc = {};
+    dsDesc.DepthEnable    = TRUE;
+    dsDesc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    dsDesc.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+    psoDesc.pRootSignature        = m_instancedSpriteRootSig.Get();
+    psoDesc.VS                    = { vsBlob->GetBufferPointer(), vsBlob->GetBufferSize() };
+    psoDesc.PS                    = { psBlob->GetBufferPointer(), psBlob->GetBufferSize() };
+    psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    psoDesc.SampleMask            = UINT_MAX;
+    psoDesc.RasterizerState       = rastDesc;
+    psoDesc.DepthStencilState     = dsDesc;
+    psoDesc.InputLayout           = { nullptr, 0 };  // procedural vertices via SV_VertexID
+    psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    psoDesc.NumRenderTargets      = 1;
+    psoDesc.RTVFormats[0]         = DXGI_FORMAT_R8G8B8A8_UNORM;
+    psoDesc.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+    psoDesc.SampleDesc.Count      = m_msaaSampleCount;
+    psoDesc.SampleDesc.Quality    = 0;
+
+    if (FAILED(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_instancedSpritePso))))
+        return false;
+
+    // Upload buffer: FrameCount regions × kMaxSpriteInstances × 80 bytes per instance
+    // (64 bytes mat4 world + 16 bytes vec4 uvRect)
+    {
+        const UINT64 bufferSize = static_cast<UINT64>(FrameCount) * kMaxSpriteInstances * 80ull;
+        D3D12_HEAP_PROPERTIES hp = {};
+        hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC rd = {};
+        rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width            = bufferSize;
+        rd.Height           = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels        = 1;
+        rd.Format           = DXGI_FORMAT_UNKNOWN;
+        rd.SampleDesc.Count = 1;
+        rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(m_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                     D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                     nullptr,
+                                                     IID_PPV_ARGS(&m_spriteInstanceBuffer))))
+            return false;
+        D3D12_RANGE readRange = { 0, 0 };
+        m_spriteInstanceBuffer->Map(0, &readRange,
+                                    reinterpret_cast<void**>(&m_spriteInstanceMapped));
+    }
+
+    return true;
+}
+
 bool DX12Context::CreatePostProcessResources()
 {
     m_hdrTarget.Reset();
@@ -1491,10 +1728,37 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
         memcpy(m_perFrameCbMapped + 256 * m_frameIndex, &cbData, sizeof(cbData));
         frameData.perFrameGpuAddr = m_perFrameCb->GetGPUVirtualAddress() + 256 * m_frameIndex;
 
+        // Per-instance data layout must match the HLSL SpriteInstance struct (80 bytes)
+        struct SpriteInstanceData { mat4 world; vec4 uvRect; };
+
+        SpriteInstanceData* instanceDst = reinterpret_cast<SpriteInstanceData*>(m_spriteInstanceMapped)
+                                          + m_frameIndex * kMaxSpriteInstances;
+        uint32_t  instanceCount     = 0;
+        Material* instancedMaterial = nullptr;
+
+        // Extract frustum planes from combined VP for this frame
+        FrustumPlane frustum[6];
+        ExtractFrustumPlanes(MatrixMultiply(frameData.viewMatrix, frameData.projMatrix), frustum);
+
+        m_instanceSortBuf.clear();
         for (auto &entity : scene->GetEntities())
         {
             if (!entity)
                 continue;
+
+            if (entity->useInstancing)
+            {
+                // Frustum cull: skip sprites whose centre is outside any plane
+                const vec3& pos = entity->transform.position;
+                if (!PointInFrustum(frustum, pos.x, pos.y, pos.z))
+                    continue;
+
+                // Squared distance for front-to-back sort (no sqrt — only ordering matters)
+                const vec3 d = pos - camera.eye;
+                m_instanceSortBuf.push_back({ d.x*d.x + d.y*d.y + d.z*d.z, entity.get() });
+                if (!instancedMaterial) instancedMaterial = entity->material.get();
+                continue;
+            }
 
             if (entity->isBillboardActor)
             {
@@ -1506,6 +1770,47 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
             }
 
             entity->Draw(m_commandList.Get(), frameData);
+            ++m_drawCallCount;
+        }
+
+        // Sort front-to-back so early-Z discards distant sprites that are hidden by closer ones
+        std::sort(m_instanceSortBuf.begin(), m_instanceSortBuf.end(),
+            [](const std::pair<float, const Entity*>& a,
+               const std::pair<float, const Entity*>& b) { return a.first < b.first; });
+
+        instanceCount = static_cast<uint32_t>(
+            std::min(m_instanceSortBuf.size(), static_cast<size_t>(kMaxSpriteInstances)));
+        for (uint32_t i = 0; i < instanceCount; ++i)
+        {
+            const Entity* e = m_instanceSortBuf[i].second;
+            instanceDst[i].world  = MatrixBillboard(
+                e->transform.position, e->transform.scale, camera.eye);
+            instanceDst[i].uvRect = e->spriteUVRect;
+        }
+
+        // Single instanced draw replaces the 5000 individual draws
+        if (instanceCount > 0 && instancedMaterial && instancedMaterial->GetSrvHeap())
+        {
+            ID3D12DescriptorHeap* heap = instancedMaterial->GetSrvHeap();
+            m_commandList->SetDescriptorHeaps(1, &heap);
+            m_commandList->SetPipelineState(m_instancedSpritePso.Get());
+            m_commandList->SetGraphicsRootSignature(m_instancedSpriteRootSig.Get());
+
+            // Param 0: perFrame CB (view, proj, cameraEye, etc.)
+            m_commandList->SetGraphicsRootConstantBufferView(0, frameData.perFrameGpuAddr);
+
+            // Param 1: root SRV pointing to this frame's region of the instance buffer
+            const D3D12_GPU_VIRTUAL_ADDRESS instAddr =
+                m_spriteInstanceBuffer->GetGPUVirtualAddress()
+                + static_cast<UINT64>(m_frameIndex) * kMaxSpriteInstances * 80ull;
+            m_commandList->SetGraphicsRootShaderResourceView(1, instAddr);
+
+            // Param 2: descriptor table — heap slot 0 (sprite atlas) → shader register t1
+            m_commandList->SetGraphicsRootDescriptorTable(
+                2, heap->GetGPUDescriptorHandleForHeapStart());
+
+            m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            m_commandList->DrawInstanced(6, instanceCount, 0, 0);
             ++m_drawCallCount;
         }
     }

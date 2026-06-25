@@ -97,6 +97,23 @@ namespace
         auto mesh = std::make_shared<Mesh>();
         return mesh->Init(device, vertices, indices) ? mesh : nullptr;
     }
+
+    // Flat horizontal quad in XZ plane with full UVs — used for blob circle shadows on the floor
+    std::shared_ptr<Mesh> CreateBlobShadowMesh(ID3D12Device* device)
+    {
+        std::vector<Vertex> vertices =
+        {
+            { vec3(-0.5f, 0.0f, -0.5f), vec3(0, 1, 0), vec4(1, 1, 1, 1), vec2(0.0f, 0.0f) },
+            { vec3( 0.5f, 0.0f, -0.5f), vec3(0, 1, 0), vec4(1, 1, 1, 1), vec2(1.0f, 0.0f) },
+            { vec3( 0.5f, 0.0f,  0.5f), vec3(0, 1, 0), vec4(1, 1, 1, 1), vec2(1.0f, 1.0f) },
+            { vec3(-0.5f, 0.0f,  0.5f), vec3(0, 1, 0), vec4(1, 1, 1, 1), vec2(0.0f, 1.0f) },
+        };
+
+        std::vector<uint32_t> indices = { 0, 2, 1, 0, 3, 2 };
+
+        auto mesh = std::make_shared<Mesh>();
+        return mesh->Init(device, vertices, indices) ? mesh : nullptr;
+    }
 }
 
 bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spriteSheetPath)
@@ -104,8 +121,9 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
     m_cubeMesh   = CreateCubeMesh(dx12.GetDevice());
     m_groundMesh = CreateGroundPlaneMesh(dx12.GetDevice());
     m_spriteMesh = CreateSpriteQuadMesh(dx12.GetDevice());
+    m_blobMesh   = CreateBlobShadowMesh(dx12.GetDevice());
 
-    if (!m_cubeMesh || !m_groundMesh || !m_spriteMesh)
+    if (!m_cubeMesh || !m_groundMesh || !m_spriteMesh || !m_blobMesh)
     {
         OutputDebugStringW(L"Game::Init failed to create meshes\n");
         return false;
@@ -153,7 +171,7 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
         m_cubeActors.push_back(&entity);
     }
 
-    // Sprite actors
+    // Sprite actors — base Y -0.15 so bottom just touches floor at lowest hover point
     m_spriteActors.reserve(3);
     for (int i = 0; i < 3; ++i)
     {
@@ -161,12 +179,27 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
         sprite.mesh = m_spriteMesh;
         sprite.material = m_material;
         sprite.isBillboardActor = true;
-        sprite.castsProjectedShadow = false;
+        sprite.castsProjectedShadow = true;
         sprite.usesSpriteTexture = true;
-        sprite.transform.SetPosition(-2.8f + i * 2.8f, 0.45f, -3.4f);
+        sprite.transform.SetPosition(-2.8f + i * 2.8f, -0.15f, -3.4f);
         sprite.transform.SetScale(1.1f, 1.5f, 1.0f);
         sprite.tint = vec4(1.0f, 1.0f, 1.0f, 1.0f);
         m_spriteActors.push_back(&sprite);
+    }
+
+    // Blob circle shadows — one flat quad per sprite, just above the floor
+    m_blobActors.reserve(3);
+    for (int i = 0; i < 3; ++i)
+    {
+        Entity& blob = m_scene.CreateEntity();
+        blob.mesh = m_blobMesh;
+        blob.material = m_material;
+        blob.isBlobShadow = true;
+        blob.castsProjectedShadow = false;
+        blob.transform.SetPosition(-2.8f + i * 2.8f, -0.999f, -3.4f);
+        blob.transform.SetScale(0.7f, 1.0f, 0.7f);
+        blob.tint = vec4(0.0f, 0.0f, 0.0f, 0.75f);
+        m_blobActors.push_back(&blob);
     }
 
     // row_00
@@ -253,7 +286,7 @@ void Game::Update(float dt, const InputState& input)
                              t * (0.7f + static_cast<float>(i) * 0.35f) + phase));
     }
 
-    // Sprite hover animation
+    // Sprite hover animation — base Y -0.15 so feet touch floor at lowest hover point
     for (size_t i = 0; i < m_spriteActors.size(); ++i)
     {
         Entity* sprite = m_spriteActors[i];
@@ -263,8 +296,29 @@ void Game::Update(float dt, const InputState& input)
         const float phase = static_cast<float>(i) * 0.55f + 1.1f;
         sprite->transform.SetPosition(
             -2.8f + static_cast<float>(i) * 2.8f,
-            0.45f + sinf(t * 1.45f + phase) * 0.18f,
+            -0.15f + sinf(t * 1.45f + phase) * 0.10f,
             -3.4f + cosf(t * 0.70f + phase) * 0.20f);
+    }
+
+    // Blob shadow — track sprite XZ, scale/fade with height above floor
+    for (size_t i = 0; i < m_blobActors.size() && i < m_spriteActors.size(); ++i)
+    {
+        Entity* blob   = m_blobActors[i];
+        Entity* sprite = m_spriteActors[i];
+        if (!blob || !sprite)
+            continue;
+
+        // sprite scale Y = 1.5, so sprite bottom = center.y - 0.75
+        const float spriteBottomY    = sprite->transform.position.y - 0.75f;
+        const float heightAboveFloor = spriteBottomY - (-1.0f); // 0 when touching floor
+
+        // blob gets darker and smaller the closer the sprite is to the floor
+        const float blobAlpha = std::max(0.15f, 0.75f - heightAboveFloor * 2.0f);
+        const float blobScale = 0.7f + heightAboveFloor * 2.0f;
+
+        blob->transform.SetPosition(sprite->transform.position.x, -0.999f, sprite->transform.position.z);
+        blob->transform.SetScale(blobScale, 1.0f, blobScale);
+        blob->tint.w = blobAlpha;
     }
 
     // Sprite frame animation

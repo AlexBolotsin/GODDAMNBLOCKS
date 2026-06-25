@@ -191,6 +191,12 @@ bool DX12Context::Init(HWND hwnd, uint32_t width, uint32_t height)
         return false;
     }
 
+    if (!CreateShadowSpritePipeline())
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreateShadowSpritePipeline\n");
+        return false;
+    }
+
     if (!CreatePostProcessResources())
     {
         OutputDebugStringA("DX12Context::Init failed in CreatePostProcessResources\n");
@@ -234,6 +240,7 @@ bool DX12Context::Init(HWND hwnd, uint32_t width, uint32_t height)
         const vec3 lightDir    = Vec3Normalize(vec3(-0.40f, -0.95f, -0.55f));
         const vec3 sceneCenter(0.0f, 0.0f, -5.0f);
         const vec3 lightPos    = sceneCenter - (lightDir * 20.0f);
+        m_lightPos             = lightPos;
         const mat4 lightView   = MatrixLookAtRH(lightPos, sceneCenter, vec3(0.0f, 1.0f, 0.0f));
         const mat4 lightProj   = MatrixOrthographicRH(22.0f, 22.0f, 0.1f, 45.0f);
         m_lightViewProj        = MatrixMultiply(lightView, lightProj);
@@ -789,6 +796,146 @@ float4 VSMain(float3 position : POSITION) : SV_POSITION
     return true;
 }
 
+bool DX12Context::CreateShadowSpritePipeline()
+{
+    // VS passes position + remapped UV to the PS; PS clips chroma-keyed transparent pixels
+    static const char* kShadowSpriteShader = R"(
+cbuffer ShadowSpriteCB : register(b0)
+{
+    row_major float4x4 worldMatrix;
+    row_major float4x4 lightViewProjMatrix;
+    float4 spriteUVRect;
+};
+Texture2D    spriteTexture : register(t0);
+SamplerState spriteSampler : register(s0);
+
+struct VSInput  { float3 position : POSITION; float2 uv : TEXCOORD0; };
+struct PSInput  { float4 position : SV_POSITION; float2 uv : TEXCOORD0; };
+
+PSInput VSMain(VSInput input)
+{
+    PSInput o;
+    float4 wp = mul(float4(input.position, 1.0f), worldMatrix);
+    o.position = mul(wp, lightViewProjMatrix);
+    o.uv = lerp(spriteUVRect.xy, spriteUVRect.zw, input.uv);
+    return o;
+}
+
+void PSMain(PSInput input)
+{
+    float4 texel     = spriteTexture.Sample(spriteSampler, input.uv);
+    float3 chromaKey = float3(34.0f / 255.0f, 177.0f / 255.0f, 76.0f / 255.0f);
+    float  alpha     = texel.a * smoothstep(0.10f, 0.16f, distance(texel.rgb, chromaKey));
+    clip(alpha - 0.05f);
+}
+)";
+
+    UINT compileFlags = 0;
+#if defined(_DEBUG)
+    compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+
+    Microsoft::WRL::ComPtr<ID3DBlob> vsBlob, psBlob, errorBlob;
+    if (FAILED(D3DCompile(kShadowSpriteShader, strlen(kShadowSpriteShader), nullptr, nullptr, nullptr,
+                          "VSMain", "vs_5_0", compileFlags, 0, &vsBlob, &errorBlob)))
+    {
+        if (errorBlob) OutputDebugStringA(static_cast<const char*>(errorBlob->GetBufferPointer()));
+        return false;
+    }
+    errorBlob.Reset();
+    if (FAILED(D3DCompile(kShadowSpriteShader, strlen(kShadowSpriteShader), nullptr, nullptr, nullptr,
+                          "PSMain", "ps_5_0", compileFlags, 0, &psBlob, &errorBlob)))
+    {
+        if (errorBlob) OutputDebugStringA(static_cast<const char*>(errorBlob->GetBufferPointer()));
+        return false;
+    }
+
+    // Slot 0: 36 root constants (world 16 + lightVP 16 + uvRect 4), vertex+pixel visible
+    // Slot 1: descriptor table — 1 SRV (t0), pixel visible
+    D3D12_ROOT_PARAMETER rootParams[2] = {};
+    rootParams[0].ParameterType            = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rootParams[0].Constants.Num32BitValues = 36;
+    rootParams[0].Constants.ShaderRegister = 0;
+    rootParams[0].ShaderVisibility         = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_DESCRIPTOR_RANGE srvRange = {};
+    srvRange.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors     = 1;
+    srvRange.BaseShaderRegister = 0;
+
+    rootParams[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[1].DescriptorTable.pDescriptorRanges   = &srvRange;
+    rootParams[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC staticSampler = {};
+    staticSampler.Filter           = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+    staticSampler.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSampler.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSampler.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSampler.ComparisonFunc   = D3D12_COMPARISON_FUNC_NEVER;
+    staticSampler.MaxLOD           = D3D12_FLOAT32_MAX;
+    staticSampler.ShaderRegister   = 0;
+    staticSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
+    rootSigDesc.NumParameters     = 2;
+    rootSigDesc.pParameters       = rootParams;
+    rootSigDesc.NumStaticSamplers = 1;
+    rootSigDesc.pStaticSamplers   = &staticSampler;
+    rootSigDesc.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    Microsoft::WRL::ComPtr<ID3DBlob> serializedSig;
+    if (FAILED(D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+                                           &serializedSig, &errorBlob)))
+    {
+        if (errorBlob) OutputDebugStringA(static_cast<const char*>(errorBlob->GetBufferPointer()));
+        return false;
+    }
+    if (FAILED(m_device->CreateRootSignature(0, serializedSig->GetBufferPointer(),
+                                              serializedSig->GetBufferSize(),
+                                              IID_PPV_ARGS(&m_shadowSpriteRootSig))))
+        return false;
+
+    // Input layout: POSITION at offset 0, TEXCOORD0 at offset 40 (past normal+color in Vertex)
+    static const D3D12_INPUT_ELEMENT_DESC inputLayout[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 40, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    };
+
+    D3D12_RASTERIZER_DESC rastDesc = {};
+    rastDesc.FillMode              = D3D12_FILL_MODE_SOLID;
+    rastDesc.CullMode              = D3D12_CULL_MODE_NONE;  // sprites render both faces
+    rastDesc.DepthBias             = 100;
+    rastDesc.SlopeScaledDepthBias  = 2.0f;
+    rastDesc.DepthClipEnable       = TRUE;
+
+    D3D12_DEPTH_STENCIL_DESC dsDesc = {};
+    dsDesc.DepthEnable    = TRUE;
+    dsDesc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    dsDesc.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+    psoDesc.pRootSignature        = m_shadowSpriteRootSig.Get();
+    psoDesc.VS                    = { vsBlob->GetBufferPointer(), vsBlob->GetBufferSize() };
+    psoDesc.PS                    = { psBlob->GetBufferPointer(), psBlob->GetBufferSize() };
+    psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    psoDesc.SampleMask            = UINT_MAX;
+    psoDesc.RasterizerState       = rastDesc;
+    psoDesc.DepthStencilState     = dsDesc;
+    psoDesc.InputLayout           = { inputLayout, 2 };
+    psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    psoDesc.NumRenderTargets      = 0;
+    psoDesc.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+    psoDesc.SampleDesc.Count      = 1;
+
+    if (FAILED(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_shadowSpritePso))))
+        return false;
+
+    return true;
+}
+
 bool DX12Context::CreatePostProcessResources()
 {
     m_hdrTarget.Reset();
@@ -1165,20 +1312,43 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
         m_commandList->RSSetViewports(1, &shadowVp);
         m_commandList->RSSetScissorRects(1, &shadowScissor);
 
-        m_commandList->SetPipelineState(m_shadowPso.Get());
-        m_commandList->SetGraphicsRootSignature(m_shadowRootSig.Get());
-
-        struct ShadowCB { mat4 world; mat4 lightVP; };
-        ShadowCB cb;
-        cb.lightVP = m_lightViewProj;
+        struct ShadowCB       { mat4 world; mat4 lightVP; };
+        struct ShadowSpriteCB { mat4 world; mat4 lightVP; vec4 uvRect; };
 
         for (auto &entity : scene->GetEntities())
         {
-            if (!entity || !entity->enabled || entity->isBillboardActor || !entity->castsProjectedShadow || !entity->mesh)
+            if (!entity || !entity->enabled || !entity->castsProjectedShadow || !entity->mesh)
                 continue;
 
-            cb.world = entity->transform.GetWorldMatrix();
-            m_commandList->SetGraphicsRoot32BitConstants(0, sizeof(cb) / 4, &cb, 0);
+            if (entity->isBillboardActor)
+            {
+                if (!entity->material || !entity->material->GetSrvHeap())
+                    continue;
+
+                m_commandList->SetPipelineState(m_shadowSpritePso.Get());
+                m_commandList->SetGraphicsRootSignature(m_shadowSpriteRootSig.Get());
+
+                ID3D12DescriptorHeap* heap = entity->material->GetSrvHeap();
+                m_commandList->SetDescriptorHeaps(1, &heap);
+                m_commandList->SetGraphicsRootDescriptorTable(1, heap->GetGPUDescriptorHandleForHeapStart());
+
+                ShadowSpriteCB scb;
+                scb.world   = MatrixBillboard(entity->transform.position, entity->transform.scale, m_lightPos);
+                scb.lightVP = m_lightViewProj;
+                scb.uvRect  = entity->spriteUVRect;
+                m_commandList->SetGraphicsRoot32BitConstants(0, sizeof(scb) / 4, &scb, 0);
+            }
+            else
+            {
+                m_commandList->SetPipelineState(m_shadowPso.Get());
+                m_commandList->SetGraphicsRootSignature(m_shadowRootSig.Get());
+
+                ShadowCB cb;
+                cb.world   = entity->transform.GetWorldMatrix();
+                cb.lightVP = m_lightViewProj;
+                m_commandList->SetGraphicsRoot32BitConstants(0, sizeof(cb) / 4, &cb, 0);
+            }
+
             entity->mesh->Draw(m_commandList.Get());
         }
 

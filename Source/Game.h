@@ -31,7 +31,9 @@ private:
     std::shared_ptr<Mesh>     m_cubeMesh;
     std::shared_ptr<Mesh>     m_groundMesh;
     std::shared_ptr<Mesh>     m_spriteMesh;
+    std::shared_ptr<Mesh>     m_blobMesh;
     std::shared_ptr<Material> m_material;
     std::vector<Entity*>      m_cubeActors;
     std::vector<Entity*>      m_spriteActors;
+    std::vector<Entity*>      m_blobActors;
 };

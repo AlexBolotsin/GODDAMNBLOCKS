@@ -43,6 +43,7 @@ private:
     bool CreateFenceAndEvent();
     bool CreateShadowMapResources();
     bool CreateShadowPipeline();
+    bool CreateShadowSpritePipeline();
     bool CreatePostProcessResources();
     bool CreatePostProcessPipelines();
     void WaitForGpu();
@@ -71,7 +72,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_shadowDsvHeap;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_shadowPso;
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_shadowRootSig;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_shadowSpritePso;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_shadowSpriteRootSig;
     mat4 m_lightViewProj;
+    vec3 m_lightPos;
 
     Microsoft::WRL::ComPtr<ID3D12Resource> m_perFrameCb;
     uint8_t* m_perFrameCbMapped = nullptr;

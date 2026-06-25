@@ -84,6 +84,17 @@ PSInput VSMain(VSInput input)
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
+    // Blob circle shadow — soft dark circle blended onto the floor
+    if (renderParams.x > 0.5f)
+    {
+        float2 d    = input.uv - 0.5f;
+        float  dist = length(d);
+        float  blob = 1.0f - smoothstep(0.20f, 0.48f, dist);
+        float  alpha = blob * input.color.a;
+        clip(alpha - 0.01f);
+        return float4(0.0f, 0.0f, 0.0f, alpha);
+    }
+
     if (renderParams.y > 0.5f)
     {
         float2 spriteUv = lerp(spriteUVRect.xy, spriteUVRect.zw, input.uv);

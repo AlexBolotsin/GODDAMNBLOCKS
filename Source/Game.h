@@ -36,4 +36,5 @@ private:
     std::vector<Entity*>      m_cubeActors;
     std::vector<Entity*>      m_spriteActors;
     std::vector<Entity*>      m_blobActors;
+    std::vector<Entity*>      m_bulkSpriteActors;
 };

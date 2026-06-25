@@ -149,7 +149,7 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
         ground.mesh = m_groundMesh;
         ground.material = m_material;
         ground.transform.SetPosition(0.0f, -1.0f, -5.0f);
-        ground.transform.SetScale(12.0f, 1.0f, 12.0f);
+        ground.transform.SetScale(100.0f, 1.0f, 100.0f);
         ground.tint = vec4(0.95f, 0.95f, 0.95f, 1.0f);
     }
 
@@ -202,42 +202,77 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
         m_blobActors.push_back(&blob);
     }
 
-    // row_00
-    m_spriteActors[0]->animFrames = {
-        MakeAtlasRect(  2.0f,  8.0f, 18.0f, 23.0f),
-        MakeAtlasRect( 24.0f,  7.0f, 19.0f, 24.0f),
-        MakeAtlasRect( 47.0f,  7.0f, 19.0f, 24.0f),
-        MakeAtlasRect( 70.0f,  8.0f, 18.0f, 23.0f),
-        MakeAtlasRect( 92.0f,  8.0f, 19.0f, 23.0f),
-        MakeAtlasRect(114.0f,  7.0f, 19.0f, 24.0f),
-        MakeAtlasRect(138.0f,  7.0f, 17.0f, 24.0f),
-        MakeAtlasRect(160.0f, 11.0f, 19.0f, 20.0f),
-        MakeAtlasRect(209.0f,  7.0f, 18.0f, 24.0f),
+    const std::vector<vec4> kAnimSets[3] =
+    {
+        {   // row_00
+            MakeAtlasRect(  2.0f,  8.0f, 18.0f, 23.0f),
+            MakeAtlasRect( 24.0f,  7.0f, 19.0f, 24.0f),
+            MakeAtlasRect( 47.0f,  7.0f, 19.0f, 24.0f),
+            MakeAtlasRect( 70.0f,  8.0f, 18.0f, 23.0f),
+            MakeAtlasRect( 92.0f,  8.0f, 19.0f, 23.0f),
+            MakeAtlasRect(114.0f,  7.0f, 19.0f, 24.0f),
+            MakeAtlasRect(138.0f,  7.0f, 17.0f, 24.0f),
+            MakeAtlasRect(160.0f, 11.0f, 19.0f, 20.0f),
+            MakeAtlasRect(209.0f,  7.0f, 18.0f, 24.0f),
+        },
+        {   // row_02
+            MakeAtlasRect(  3.0f, 36.0f, 18.0f, 23.0f),
+            MakeAtlasRect( 25.0f, 35.0f, 18.0f, 24.0f),
+            MakeAtlasRect( 47.0f, 35.0f, 19.0f, 24.0f),
+            MakeAtlasRect( 70.0f, 36.0f, 18.0f, 23.0f),
+            MakeAtlasRect( 93.0f, 36.0f, 18.0f, 23.0f),
+            MakeAtlasRect(114.0f, 35.0f, 19.0f, 24.0f),
+            MakeAtlasRect(139.0f, 36.0f, 17.0f, 23.0f),
+            MakeAtlasRect(160.0f, 40.0f, 19.0f, 19.0f),
+            MakeAtlasRect(210.0f, 35.0f, 17.0f, 24.0f),
+        },
+        {   // row_04
+            MakeAtlasRect(  2.0f, 64.0f, 18.0f, 24.0f),
+            MakeAtlasRect( 25.0f, 64.0f, 18.0f, 24.0f),
+            MakeAtlasRect( 47.0f, 64.0f, 19.0f, 24.0f),
+            MakeAtlasRect( 70.0f, 64.0f, 18.0f, 24.0f),
+            MakeAtlasRect( 92.0f, 64.0f, 19.0f, 24.0f),
+            MakeAtlasRect(114.0f, 64.0f, 19.0f, 24.0f),
+            MakeAtlasRect(139.0f, 64.0f, 14.0f, 24.0f),
+            MakeAtlasRect(159.0f, 69.0f, 20.0f, 19.0f),
+            MakeAtlasRect(210.0f, 64.0f, 17.0f, 24.0f),
+        },
     };
-    // row_02
-    m_spriteActors[1]->animFrames = {
-        MakeAtlasRect(  3.0f, 36.0f, 18.0f, 23.0f),
-        MakeAtlasRect( 25.0f, 35.0f, 18.0f, 24.0f),
-        MakeAtlasRect( 47.0f, 35.0f, 19.0f, 24.0f),
-        MakeAtlasRect( 70.0f, 36.0f, 18.0f, 23.0f),
-        MakeAtlasRect( 93.0f, 36.0f, 18.0f, 23.0f),
-        MakeAtlasRect(114.0f, 35.0f, 19.0f, 24.0f),
-        MakeAtlasRect(139.0f, 36.0f, 17.0f, 23.0f),
-        MakeAtlasRect(160.0f, 40.0f, 19.0f, 19.0f),
-        MakeAtlasRect(210.0f, 35.0f, 17.0f, 24.0f),
+
+    m_spriteActors[0]->animFrames = kAnimSets[0];
+    m_spriteActors[1]->animFrames = kAnimSets[1];
+    m_spriteActors[2]->animFrames = kAnimSets[2];
+
+    // 5000 bulk sprites scattered across the floor
+    static constexpr int kBulkCount = 5000;
+    m_bulkSpriteActors.reserve(kBulkCount);
+
+    // Deterministic LCG — no need for rand()/srand()
+    uint32_t rng = 0xDEADBEEFu;
+    auto Rng = [&rng]() -> float {
+        rng = rng * 1664525u + 1013904223u;
+        return static_cast<float>(rng >> 16) / 65535.0f;
     };
-    // row_04
-    m_spriteActors[2]->animFrames = {
-        MakeAtlasRect(  2.0f, 64.0f, 18.0f, 24.0f),
-        MakeAtlasRect( 25.0f, 64.0f, 18.0f, 24.0f),
-        MakeAtlasRect( 47.0f, 64.0f, 19.0f, 24.0f),
-        MakeAtlasRect( 70.0f, 64.0f, 18.0f, 24.0f),
-        MakeAtlasRect( 92.0f, 64.0f, 19.0f, 24.0f),
-        MakeAtlasRect(114.0f, 64.0f, 19.0f, 24.0f),
-        MakeAtlasRect(139.0f, 64.0f, 14.0f, 24.0f),
-        MakeAtlasRect(159.0f, 69.0f, 20.0f, 19.0f),
-        MakeAtlasRect(210.0f, 64.0f, 17.0f, 24.0f),
-    };
+
+    for (int i = 0; i < kBulkCount; ++i)
+    {
+        const float x   = (Rng() - 0.5f) * 90.0f;
+        const float z   = (Rng() - 0.5f) * 90.0f - 5.0f;
+        const int   row = static_cast<int>(Rng() * 2.99f); // 0, 1, or 2
+
+        Entity& sprite              = m_scene.CreateEntity();
+        sprite.mesh                 = m_spriteMesh;
+        sprite.material             = m_material;
+        sprite.isBillboardActor     = true;
+        sprite.castsProjectedShadow = false;
+        sprite.usesSpriteTexture    = true;
+        sprite.transform.SetPosition(x, -0.15f, z);
+        sprite.transform.SetScale(1.1f, 1.5f, 1.0f);
+        sprite.tint                 = vec4(1.0f, 1.0f, 1.0f, 1.0f);
+        sprite.animFrames           = kAnimSets[row];
+        sprite.animTimer            = Rng() * 4.0f; // stagger starting frame
+        m_bulkSpriteActors.push_back(&sprite);
+    }
 
     return true;
 }
@@ -321,11 +356,30 @@ void Game::Update(float dt, const InputState& input)
         blob->tint.w = blobAlpha;
     }
 
-    // Sprite frame animation
+    // Sprite frame animation (original 3)
     for (Entity* sprite : m_spriteActors)
     {
         if (!sprite || sprite->animFrames.empty())
             continue;
+
+        sprite->animTimer += dt;
+        const int frameIndex = static_cast<int>(sprite->animTimer * sprite->animSpeed)
+                               % static_cast<int>(sprite->animFrames.size());
+        sprite->spriteUVRect = sprite->animFrames[frameIndex];
+    }
+
+    // Bulk sprite hover + frame animation
+    for (size_t i = 0; i < m_bulkSpriteActors.size(); ++i)
+    {
+        Entity* sprite = m_bulkSpriteActors[i];
+        if (!sprite || sprite->animFrames.empty())
+            continue;
+
+        const float phase = static_cast<float>(i) * 0.13f;
+        sprite->transform.SetPosition(
+            sprite->transform.position.x,
+            -0.15f + sinf(t * 1.45f + phase) * 0.10f,
+            sprite->transform.position.z);
 
         sprite->animTimer += dt;
         const int frameIndex = static_cast<int>(sprite->animTimer * sprite->animSpeed)

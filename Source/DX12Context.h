@@ -27,12 +27,17 @@ public:
     ID3D12Device* GetDevice() const { return m_device.Get(); }
     ID3D12GraphicsCommandList* GetCommandList() const { return m_commandList.Get(); }
     ID3D12CommandQueue* GetCommandQueue() const { return m_commandQueue.Get(); }
+    uint32_t GetMsaaSampleCount() const { return m_msaaSampleCount; }
 
 private:
+    void LogAllAdapters();
+    void LogAdapterInfo(Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter);
+
     bool CreateDevice();
     bool CreateCommandObjects();
     bool CreateSwapChain(HWND hwnd, uint32_t width, uint32_t height);
     bool CreateRenderTargetViews();
+    bool CreateDSVHeap();
     bool CreateDepthStencilBuffer();
     bool CreateFenceAndEvent();
     void WaitForGpu();
@@ -50,13 +55,18 @@ private:
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_dsvHeap;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_renderTargets[FrameCount];
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_msaaColorTarget;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_depthStencil;
     Microsoft::WRL::ComPtr<ID3D12Fence> m_fence;
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> m_adapter;
 
     HANDLE m_fenceEvent = nullptr;
     uint64_t m_fenceValues[FrameCount] = {};
     uint32_t m_rtvDescriptorSize = 0;
     DXGI_FORMAT m_depthStencilFormat = DXGI_FORMAT_D32_FLOAT;
+    DXGI_FORMAT m_msaaColorFormat = DXGI_FORMAT_R32_TYPELESS;
+    uint32_t m_msaaSampleCount = 8;
+    uint32_t m_msaaQuality = 0;
     uint32_t m_frameIndex = 0;
     uint32_t m_width = 0;
     uint32_t m_height = 0;

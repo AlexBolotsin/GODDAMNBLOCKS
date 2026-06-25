@@ -322,7 +322,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     const bool shouldUninitializeCom = SUCCEEDED(comInitHr);
     if (FAILED(comInitHr) && comInitHr != RPC_E_CHANGED_MODE)
     {
-        MessageBoxW(nullptr, L"Failed to initialize COM for sprite loading.", L"COM Error", MB_OK | MB_ICONERROR);
+        OutputDebugStringW(L"Failed to initialize COM for sprite loading.\n");
         return -100;
     }
 
@@ -356,7 +356,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     DX12Context dx12;
     if (!dx12.Init(window.GetHWND(), window.GetWidth(), window.GetHeight()))
     {
-        MessageBoxW(nullptr, L"Failed to initialize DirectX 12.", L"DX12 Error", MB_OK | MB_ICONERROR);
+        OutputDebugStringW(L"Failed to initialize DirectX 12.\n");
         return -1;
     }
 
@@ -370,7 +370,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
 
     if (!cubeMesh || !groundMesh || !spriteMesh)
     {
-        MessageBoxW(nullptr, L"Failed to create scene mesh.", L"Mesh Error", MB_OK | MB_ICONERROR);
+        OutputDebugStringW(L"Failed to create scene mesh.\n");
         dx12.Shutdown();
         return -1;
     }
@@ -378,7 +378,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     const std::wstring spriteSheetPath = GetSpriteSheetPath();
 
     auto sharedMaterial = std::make_shared<Material>();
-    if (!sharedMaterial->Init(dx12.GetDevice(), dx12.GetCommandQueue(), spriteSheetPath.c_str()))
+    if (!sharedMaterial->Init(dx12.GetDevice(), dx12.GetCommandQueue(), spriteSheetPath.c_str(), dx12.GetMsaaSampleCount()))
     {
         const Material::InitFailureStage stage = sharedMaterial->GetLastInitFailureStage();
         const wchar_t* message = L"Failed to initialize shared material.";
@@ -400,7 +400,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
             exitCode = -22;
         }
 
-        MessageBoxW(nullptr, message, L"Material Error", MB_OK | MB_ICONERROR);
+        OutputDebugStringW(message);
+        OutputDebugStringW(L"\n");
         dx12.Shutdown();
         return exitCode;
     }
@@ -518,13 +519,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
             camTarget.z + sinf(camAngle) * camRadius);
         dx12.SetCamera(camPos, camTarget);
 
-        DebugStageLog("Before BeginFrame");
         dx12.BeginFrame();
-        DebugStageLog("Before RenderScene");
         dx12.RenderScene(&scene);
-        DebugStageLog("Before EndFrame");
         dx12.EndFrame();
-        DebugStageLog("After EndFrame");
     }
 
     dx12.Shutdown();

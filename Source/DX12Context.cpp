@@ -1,20 +1,120 @@
 #include "DX12Context.h"
 #include "Scene.h"
 #include <cmath>
+#include <cstdio>
 
 namespace
 {
-    vec3 Vec3Sub(const vec3& a, const vec3& b)
+    uint32_t FindHighestSupportedSampleCount(ID3D12Device *device, DXGI_FORMAT format, uint32_t maxRequestedSampleCount)
+    {
+        if (!device)
+            return 1;
+
+        const uint32_t candidates[] = {16, 8, 4, 2};
+        for (uint32_t sampleCount : candidates)
+        {
+            if (sampleCount > maxRequestedSampleCount)
+                continue;
+
+            D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS msaaFeature = {};
+            msaaFeature.Format = format;
+            msaaFeature.SampleCount = sampleCount;
+            msaaFeature.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
+
+            if (SUCCEEDED(device->CheckFeatureSupport(
+                    D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
+                    &msaaFeature,
+                    sizeof(msaaFeature))) &&
+                msaaFeature.NumQualityLevels > 0)
+            {
+                return sampleCount;
+            }
+        }
+
+        return 1;
+    }
+
+    uint32_t FindHighestCommonSampleCount(
+        ID3D12Device *device,
+        DXGI_FORMAT colorFormat,
+        DXGI_FORMAT depthFormat,
+        uint32_t maxRequestedSampleCount)
+    {
+        if (!device)
+            return 1;
+
+        const uint32_t candidates[] = {16, 8, 4, 2};
+        for (uint32_t sampleCount : candidates)
+        {
+            if (sampleCount > maxRequestedSampleCount)
+                continue;
+
+            D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS colorFeature = {};
+            colorFeature.Format = colorFormat;
+            colorFeature.SampleCount = sampleCount;
+            colorFeature.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
+
+            D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS depthFeature = {};
+            depthFeature.Format = depthFormat;
+            depthFeature.SampleCount = sampleCount;
+            depthFeature.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
+
+            const bool colorSupported = SUCCEEDED(device->CheckFeatureSupport(
+                                            D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
+                                            &colorFeature,
+                                            sizeof(colorFeature))) &&
+                                        colorFeature.NumQualityLevels > 0;
+
+            const bool depthSupported = SUCCEEDED(device->CheckFeatureSupport(
+                                            D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
+                                            &depthFeature,
+                                            sizeof(depthFeature))) &&
+                                        depthFeature.NumQualityLevels > 0;
+
+            if (colorSupported && depthSupported)
+                return sampleCount;
+        }
+
+        return 1;
+    }
+
+    void LogMsaaSupport(
+        ID3D12Device *device,
+        DXGI_FORMAT colorFormat,
+        DXGI_FORMAT depthFormat,
+        uint32_t requestedSampleCount,
+        uint32_t selectedSampleCount)
+    {
+        if (!device)
+            return;
+
+        const uint32_t maxColorSamples = FindHighestSupportedSampleCount(device, colorFormat, 16);
+        const uint32_t maxDepthSamples = FindHighestSupportedSampleCount(device, depthFormat, 16);
+        const uint32_t maxCommonSamples = FindHighestCommonSampleCount(device, colorFormat, depthFormat, 16);
+
+        char buffer[256] = {};
+        sprintf_s(
+            buffer,
+            "DX12Context::Init MSAA support - color max: %u, depth max: %u, common max: %u, requested: %u, selected: %u\n",
+            maxColorSamples,
+            maxDepthSamples,
+            maxCommonSamples,
+            requestedSampleCount,
+            selectedSampleCount);
+        OutputDebugStringA(buffer);
+    }
+
+    vec3 Vec3Sub(const vec3 &a, const vec3 &b)
     {
         return vec3(a.x - b.x, a.y - b.y, a.z - b.z);
     }
 
-    float Vec3Dot(const vec3& a, const vec3& b)
+    float Vec3Dot(const vec3 &a, const vec3 &b)
     {
         return a.x * b.x + a.y * b.y + a.z * b.z;
     }
 
-    vec3 Vec3Cross(const vec3& a, const vec3& b)
+    vec3 Vec3Cross(const vec3 &a, const vec3 &b)
     {
         return vec3(
             a.y * b.z - a.z * b.y,
@@ -22,7 +122,7 @@ namespace
             a.x * b.y - a.y * b.x);
     }
 
-    vec3 Vec3Normalize(const vec3& v)
+    vec3 Vec3Normalize(const vec3 &v)
     {
         const float lenSq = v.x * v.x + v.y * v.y + v.z * v.z;
         if (lenSq <= 1e-12f)
@@ -32,7 +132,7 @@ namespace
         return vec3(v.x * invLen, v.y * invLen, v.z * invLen);
     }
 
-    mat4 BuildLookAtRH(const vec3& eye, const vec3& target, const vec3& up)
+    mat4 BuildLookAtRH(const vec3 &eye, const vec3 &target, const vec3 &up)
     {
         const vec3 zAxis = Vec3Normalize(Vec3Sub(eye, target));
         const vec3 xAxis = Vec3Normalize(Vec3Cross(up, zAxis));
@@ -77,7 +177,7 @@ namespace
         return result;
     }
 
-    mat4 BuildDirectionalShadowProjection(float planeY, const vec3& rayDir)
+    mat4 BuildDirectionalShadowProjection(float planeY, const vec3 &rayDir)
     {
         mat4 shadow;
 
@@ -108,7 +208,7 @@ namespace
         return shadow;
     }
 
-    mat4 BuildBillboardWorld(const vec3& position, const vec3& scale, const vec3& cameraEye)
+    mat4 BuildBillboardWorld(const vec3 &position, const vec3 &scale, const vec3 &cameraEye)
     {
         vec3 toCamera = Vec3Normalize(Vec3Sub(cameraEye, position));
         if (toCamera.x == 0.0f && toCamera.y == 0.0f && toCamera.z == 0.0f)
@@ -148,12 +248,11 @@ namespace
     }
 }
 
-void DX12Context::SetCamera(const vec3& eye, const vec3& target)
+void DX12Context::SetCamera(const vec3 &eye, const vec3 &target)
 {
     m_cameraEye = eye;
     m_cameraTarget = target;
 }
-
 
 DX12Context::~DX12Context()
 {
@@ -164,25 +263,69 @@ bool DX12Context::Init(HWND hwnd, uint32_t width, uint32_t height)
 {
     m_width = width;
     m_height = height;
+    const uint32_t requestedMsaaSampleCount = m_msaaSampleCount;
 
     if (!CreateDevice())
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreateDevice\n");
         return false;
+    }
+
+    m_msaaSampleCount = FindHighestCommonSampleCount(
+        m_device.Get(),
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        m_depthStencilFormat,
+        requestedMsaaSampleCount);
+
+    LogMsaaSupport(
+        m_device.Get(),
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        m_depthStencilFormat,
+        requestedMsaaSampleCount,
+        m_msaaSampleCount);
+
+    if (m_msaaSampleCount != requestedMsaaSampleCount)
+    {
+        OutputDebugStringA("DX12Context::Init requested MSAA level unavailable, using fallback sample count\n");
+    }
 
     if (!CreateCommandObjects())
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreateCommandObjects\n");
         return false;
+    }
 
     if (!CreateSwapChain(hwnd, width, height))
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreateSwapChain\n");
         return false;
+    }
 
     if (!CreateRenderTargetViews())
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreateRenderTargetViews\n");
         return false;
+    }
+
+    if (!CreateDSVHeap())
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreateDSVHeap\n");
+        return false;
+    }
 
     if (!CreateDepthStencilBuffer())
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreateDepthStencilBuffer\n");
         return false;
+    }
 
     if (!CreateFenceAndEvent())
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreateFenceAndEvent\n");
         return false;
+    }
 
+    OutputDebugStringA("DX12Context::Init succeeded\n");
     return true;
 }
 
@@ -208,6 +351,7 @@ void DX12Context::Shutdown()
     m_commandList.Reset();
     m_rtvHeap.Reset();
     m_dsvHeap.Reset();
+    m_msaaColorTarget.Reset();
     m_depthStencil.Reset();
     m_swapChain.Reset();
     m_commandQueue.Reset();
@@ -216,34 +360,120 @@ void DX12Context::Shutdown()
     m_dxgiFactory.Reset();
 }
 
+void DX12Context::LogAdapterInfo(Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter)
+{
+    if (!adapter)
+        return;
+
+    DXGI_ADAPTER_DESC1 desc = {};
+    adapter->GetDesc1(&desc);
+
+    wchar_t buf[512];
+    swprintf_s(buf,
+               L"[DX12] ================================\n"
+               L"[DX12] Adapter:       %s\n"
+               L"[DX12] Vendor ID:     0x%04X\n"
+               L"[DX12] Device ID:     0x%04X\n"
+               L"[DX12] VRAM:          %zu MB\n"
+               L"[DX12] Shared RAM:    %zu MB\n"
+               L"[DX12] System RAM:    %zu MB\n"
+               L"[DX12] ================================\n",
+               desc.Description,
+               desc.VendorId,
+               desc.DeviceId,
+               desc.DedicatedVideoMemory / (1024 * 1024),
+               desc.SharedSystemMemory / (1024 * 1024),
+               desc.DedicatedSystemMemory / (1024 * 1024));
+
+    OutputDebugStringW(buf);
+}
+
+void DX12Context::LogAllAdapters()
+{
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+    for (UINT i = 0;
+         m_dxgiFactory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND;
+         ++i)
+    {
+        DXGI_ADAPTER_DESC1 desc = {};
+        adapter->GetDesc1(&desc);
+
+        wchar_t buf[256];
+        swprintf_s(buf,
+                   L"[DX12] Adapter %u: %s | VRAM: %zu MB | Software: %s\n",
+                   i,
+                   desc.Description,
+                   desc.DedicatedVideoMemory / (1024 * 1024),
+                   (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) ? L"YES" : L"NO");
+
+        OutputDebugStringW(buf);
+    }
+}
+
 bool DX12Context::CreateDevice()
 {
-    UINT dxgiFactoryFlags = 0;
-
+    // 1. Create factory first
+    UINT factoryFlags = 0;
 #if defined(_DEBUG)
-    {
-        Microsoft::WRL::ComPtr<ID3D12Debug> debugController;
-        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
-        {
-            debugController->EnableDebugLayer();
-            dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
-        }
-    }
+    factoryFlags = DXGI_CREATE_FACTORY_DEBUG;
 #endif
 
-    if (FAILED(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&m_dxgiFactory))))
-        return false;
-
-    if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_device))))
+    HRESULT hr = CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&m_dxgiFactory));
+    if (FAILED(hr))
     {
-        Microsoft::WRL::ComPtr<IDXGIAdapter> warpAdapter;
-        if (FAILED(m_dxgiFactory->EnumWarpAdapter(IID_PPV_ARGS(&warpAdapter))))
-            return false;
-
-        if (FAILED(D3D12CreateDevice(warpAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_device))))
-            return false;
+        OutputDebugStringW(L"[DX12] Failed to create DXGI factory\n");
+        return false;
     }
 
+    // 2. Log all adapters so you can see what's available
+    LogAllAdapters();
+
+    // 3. Pick the best hardware adapter explicitly
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter1;
+    for (UINT i = 0;
+         m_dxgiFactory->EnumAdapters1(i, &adapter1) != DXGI_ERROR_NOT_FOUND;
+         ++i)
+    {
+        DXGI_ADAPTER_DESC1 desc = {};
+        adapter1->GetDesc1(&desc);
+
+        // Skip software adapters
+        if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+            continue;
+
+        // Test DX12 support without creating a device
+        hr = D3D12CreateDevice(adapter1.Get(),
+                               D3D_FEATURE_LEVEL_11_0,
+                               __uuidof(ID3D12Device),
+                               nullptr); // nullptr = test only, no device created
+        if (SUCCEEDED(hr))
+        {
+            adapter1.As(&m_adapter);
+            break;
+        }
+    }
+
+    if (!m_adapter)
+    {
+        OutputDebugStringW(L"[DX12] No hardware adapter found, falling back to WARP\n");
+        Microsoft::WRL::ComPtr<IDXGIAdapter> warp;
+        m_dxgiFactory->EnumWarpAdapter(IID_PPV_ARGS(&warp));
+        warp.As(&m_adapter);
+    }
+
+    // 4. Create device with explicit adapter
+    hr = D3D12CreateDevice(m_adapter.Get(),
+                           D3D_FEATURE_LEVEL_11_0,
+                           IID_PPV_ARGS(&m_device));
+    if (FAILED(hr))
+    {
+        wchar_t buf[128];
+        swprintf_s(buf, L"[DX12] CreateDevice failed. HRESULT: 0x%08X\n", hr);
+        OutputDebugStringW(buf);
+        return false;
+    }
+
+    LogAdapterInfo(m_adapter);
     return true;
 }
 
@@ -301,7 +531,7 @@ bool DX12Context::CreateSwapChain(HWND hwnd, uint32_t width, uint32_t height)
 bool DX12Context::CreateRenderTargetViews()
 {
     D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
-    rtvHeapDesc.NumDescriptors = FrameCount;
+    rtvHeapDesc.NumDescriptors = FrameCount + 1;
     rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 
@@ -321,69 +551,178 @@ bool DX12Context::CreateRenderTargetViews()
         rtvHandle.ptr += m_rtvDescriptorSize;
     }
 
+    D3D12_RESOURCE_DESC msaaDesc = {};
+    msaaDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    msaaDesc.Alignment = 0;
+    msaaDesc.Width = m_width;
+    msaaDesc.Height = m_height;
+    msaaDesc.DepthOrArraySize = 1;
+    msaaDesc.MipLevels = 1;
+    msaaDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    msaaDesc.SampleDesc.Count = m_msaaSampleCount;
+    msaaDesc.SampleDesc.Quality = 0;
+    msaaDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    msaaDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+    D3D12_HEAP_PROPERTIES heapProps = {};
+    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    if (FAILED(m_device->CreateCommittedResource(
+            &heapProps,
+            D3D12_HEAP_FLAG_NONE,
+            &msaaDesc,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,
+            nullptr,
+            IID_PPV_ARGS(&m_msaaColorTarget))))
+    {
+        return false;
+    }
+
+    m_msaaColorTarget->SetName(L"MSAA Color Target");
+
+    m_device->CreateRenderTargetView(m_msaaColorTarget.Get(), nullptr, rtvHandle);
+
+    return true;
+}
+
+bool DX12Context::CreateDSVHeap()
+{
+    D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+    desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    desc.NumDescriptors = 1;
+    desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE; // ← must be NONE for DSV
+    desc.NodeMask = 0;
+
+    HRESULT hr = m_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_dsvHeap));
+    if (FAILED(hr))
+    {
+        wchar_t buf[64];
+        swprintf_s(buf, L"[DX12] CreateDescriptorHeap DSV failed: 0x%08X\n", hr);
+        OutputDebugStringW(buf);
+        return false;
+    }
+
+    // Verify heap handle is valid
+    auto handle = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    wchar_t buf[128];
+    swprintf_s(buf, L"[DX12] DSV heap handle: %zu  type=%u  count=%u  flags=%u\n",
+               handle.ptr, desc.Type, desc.NumDescriptors, desc.Flags);
+    OutputDebugStringW(buf);
+
     return true;
 }
 
 bool DX12Context::CreateDepthStencilBuffer()
 {
+    OutputDebugStringW(L"[DX12] DSV: starting\n");
+
+    if (!m_device)
+    {
+        OutputDebugStringW(L"[DX12] DSV: device is null\n");
+        return false;
+    }
     if (!m_dsvHeap)
     {
-        D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
-        dsvHeapDesc.NumDescriptors = 1;
-        dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-        dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-
-        if (FAILED(m_device->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&m_dsvHeap))))
-            return false;
+        OutputDebugStringW(L"[DX12] DSV: dsvHeap is null\n");
+        return false;
     }
-
-    m_depthStencil.Reset();
-
-    D3D12_RESOURCE_DESC depthDesc = {};
-    depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    depthDesc.Alignment = 0;
-    depthDesc.Width = m_width;
-    depthDesc.Height = m_height;
-    depthDesc.DepthOrArraySize = 1;
-    depthDesc.MipLevels = 1;
-    depthDesc.Format = m_depthStencilFormat;
-    depthDesc.SampleDesc.Count = 1;
-    depthDesc.SampleDesc.Quality = 0;
-    depthDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    if (m_width == 0 || m_height == 0)
+    {
+        OutputDebugStringW(L"[DX12] DSV: zero dimension\n");
+        return false;
+    }
 
     D3D12_HEAP_PROPERTIES heapProps = {};
     heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
 
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Alignment = 0;
+    desc.Width = m_width;
+    desc.Height = m_height;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_R32_TYPELESS;
+    desc.SampleDesc.Count = m_msaaSampleCount;
+    desc.SampleDesc.Quality = m_msaaQuality;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
     D3D12_CLEAR_VALUE clearValue = {};
-    clearValue.Format = m_depthStencilFormat;
+    clearValue.Format = DXGI_FORMAT_D32_FLOAT;
     clearValue.DepthStencil.Depth = 1.0f;
     clearValue.DepthStencil.Stencil = 0;
 
-    if (FAILED(m_device->CreateCommittedResource(
+    wchar_t buf[256];
+    swprintf_s(buf,
+               L"[DX12] DSV desc: w=%u h=%u fmt=%u "
+               L"sampleCount=%u sampleQuality=%u\n",
+               (UINT)desc.Width, desc.Height, desc.Format,
+               desc.SampleDesc.Count, desc.SampleDesc.Quality);
+    OutputDebugStringW(buf);
+
+    HRESULT hr = m_device->CreateCommittedResource(
         &heapProps,
         D3D12_HEAP_FLAG_NONE,
-        &depthDesc,
+        &desc,
         D3D12_RESOURCE_STATE_DEPTH_WRITE,
         &clearValue,
-        IID_PPV_ARGS(&m_depthStencil))))
+        IID_PPV_ARGS(&m_depthStencil));
+
+    if (FAILED(hr))
     {
+        swprintf_s(buf, L"[DX12] CreateCommittedResource DSV failed: 0x%08X\n", hr);
+        OutputDebugStringW(buf);
         return false;
     }
 
+    OutputDebugStringW(L"[DX12] DSV: resource created OK, creating view\n");
+
     D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
-    dsvDesc.Format = m_depthStencilFormat;
-    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
     dsvDesc.Flags = D3D12_DSV_FLAG_NONE;
 
-    m_device->CreateDepthStencilView(m_depthStencil.Get(), &dsvDesc, m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
+    if (m_msaaSampleCount > 1)
+        dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMS;
+    else
+    {
+        dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        dsvDesc.Texture2D.MipSlice = 0;
+    }
+
+    swprintf_s(buf,
+               L"[DX12] DSV view: fmt=%u dim=%u\n",
+               dsvDesc.Format, dsvDesc.ViewDimension);
+    OutputDebugStringW(buf);
+
+    m_device->CreateDepthStencilView(
+        m_depthStencil.Get(),
+        &dsvDesc,
+        m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    OutputDebugStringW(L"[DX12] DSV: view created OK\n");
+
     return true;
 }
 
 bool DX12Context::CreateFenceAndEvent()
 {
-    if (FAILED(m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence))))
+    HRESULT hr = m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence));
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
+    {
+        HRESULT reason = m_device->GetDeviceRemovedReason();
+        wchar_t buf[128];
+        swprintf_s(buf, L"[DX12] Device removed. Reason: 0x%08X\n", reason);
+        OutputDebugStringW(buf);
         return false;
+    }
+    else if (FAILED(hr))
+    {
+        wchar_t buf[128];
+        swprintf_s(buf, L"[DX12] CreateFence failed. HRESULT: 0x%08X\n", hr);
+        OutputDebugStringW(buf);
+        return false;
+    }
 
     for (uint32_t i = 0; i < FrameCount; ++i)
     {
@@ -399,6 +738,9 @@ bool DX12Context::CreateFenceAndEvent()
 
 void DX12Context::WaitForGpu()
 {
+    if (!m_commandQueue || !m_fence)
+        return;
+
     const uint64_t fenceValue = m_fenceValues[m_frameIndex];
     if (FAILED(m_commandQueue->Signal(m_fence.Get(), fenceValue)))
         return;
@@ -416,6 +758,9 @@ void DX12Context::WaitForGpu()
 
 void DX12Context::MoveToNextFrame()
 {
+    if (!m_commandQueue || !m_fence || !m_swapChain)
+        return;
+
     const uint64_t currentFenceValue = m_fenceValues[m_frameIndex];
 
     if (FAILED(m_commandQueue->Signal(m_fence.Get(), currentFenceValue)))
@@ -466,23 +811,13 @@ void DX12Context::BeginFrame()
     if (FAILED(m_commandList->Reset(m_commandAllocators[m_frameIndex].Get(), nullptr)))
         return;
 
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barrier.Transition.pResource = m_renderTargets[m_frameIndex].Get();
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-
-    m_commandList->ResourceBarrier(1, &barrier);
-
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
-    rtvHandle.ptr += m_frameIndex * m_rtvDescriptorSize;
+    D3D12_CPU_DESCRIPTOR_HANDLE msaaRtvHandle = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    msaaRtvHandle.ptr += FrameCount * m_rtvDescriptorSize;
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
 
-    const FLOAT clearColor[4] = { 0.46f, 0.56f, 0.69f, 1.0f };
-    m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
-    m_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+    const FLOAT clearColor[4] = {0.46f, 0.56f, 0.69f, 1.0f};
+    m_commandList->OMSetRenderTargets(1, &msaaRtvHandle, FALSE, &dsvHandle);
+    m_commandList->ClearRenderTargetView(msaaRtvHandle, clearColor, 0, nullptr);
     m_commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
     D3D12_VIEWPORT viewport = {};
@@ -504,7 +839,7 @@ void DX12Context::BeginFrame()
     m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 }
 
-void DX12Context::RenderScene(Scene* scene)
+void DX12Context::RenderScene(Scene *scene)
 {
     if (!scene)
         return;
@@ -514,7 +849,7 @@ void DX12Context::RenderScene(Scene* scene)
     frameData.viewMatrix = BuildLookAtRH(m_cameraEye, m_cameraTarget, vec3(0.0f, 1.0f, 0.0f));
     frameData.projMatrix = BuildPerspectiveRH(1.0471976f, aspect, 0.1f, 100.0f);
 
-    for (auto& entity : scene->GetEntities())
+    for (auto &entity : scene->GetEntities())
     {
         if (!entity)
             continue;
@@ -536,21 +871,21 @@ void DX12Context::RenderScene(Scene* scene)
     const mat4 shadowProj = BuildDirectionalShadowProjection(groundPlaneY, shadowRayDir);
 
     const vec4 shadowTints[] =
-    {
-        vec4(0.0f, 0.0f, 0.0f, 0.16f),
-        vec4(0.0f, 0.0f, 0.0f, 0.08f),
-        vec4(0.0f, 0.0f, 0.0f, 0.08f),
-    };
+        {
+            vec4(0.0f, 0.0f, 0.0f, 0.16f),
+            vec4(0.0f, 0.0f, 0.0f, 0.08f),
+            vec4(0.0f, 0.0f, 0.0f, 0.08f),
+        };
     const vec3 shadowOffsets[] =
-    {
-        vec3(0.0f, 0.0015f, 0.0f),
-        vec3(0.06f, 0.0030f, 0.03f),
-        vec3(-0.05f, 0.0045f, -0.02f),
-    };
+        {
+            vec3(0.0f, 0.0015f, 0.0f),
+            vec3(0.06f, 0.0030f, 0.03f),
+            vec3(-0.05f, 0.0045f, -0.02f),
+        };
 
     for (size_t i = 1; i < scene->GetEntities().size(); ++i)
     {
-        Entity* entity = scene->GetEntities()[i].get();
+        Entity *entity = scene->GetEntities()[i].get();
         if (!entity || entity->isBillboardActor || !entity->castsProjectedShadow)
             continue;
 
@@ -568,19 +903,51 @@ void DX12Context::RenderScene(Scene* scene)
 
 void DX12Context::EndFrame()
 {
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barrier.Transition.pResource = m_renderTargets[m_frameIndex].Get();
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-    m_commandList->ResourceBarrier(1, &barrier);
+    D3D12_RESOURCE_BARRIER barriers[2] = {};
+
+    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barriers[0].Transition.pResource = m_msaaColorTarget.Get();
+    barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+
+    barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barriers[1].Transition.pResource = m_renderTargets[m_frameIndex].Get();
+    barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_DEST;
+
+    m_commandList->ResourceBarrier(2, barriers);
+
+    m_commandList->ResolveSubresource(
+        m_renderTargets[m_frameIndex].Get(),
+        0,
+        m_msaaColorTarget.Get(),
+        0,
+        DXGI_FORMAT_R8G8B8A8_UNORM);
+
+    D3D12_RESOURCE_BARRIER postBarriers[2] = {};
+
+    postBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    postBarriers[0].Transition.pResource = m_renderTargets[m_frameIndex].Get();
+    postBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_DEST;
+    postBarriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    postBarriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+    postBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    postBarriers[1].Transition.pResource = m_msaaColorTarget.Get();
+    postBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+    postBarriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    postBarriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+    m_commandList->ResourceBarrier(2, postBarriers);
 
     if (FAILED(m_commandList->Close()))
         return;
 
-    ID3D12CommandList* commandLists[] = { m_commandList.Get() };
+    ID3D12CommandList *commandLists[] = {m_commandList.Get()};
     m_commandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
     m_swapChain->Present(1, 0);
     MoveToNextFrame();

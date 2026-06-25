@@ -98,9 +98,10 @@ Material::~Material()
     Shutdown();
 }
 
-bool Material::Init(ID3D12Device* device, ID3D12CommandQueue* commandQueue, const wchar_t* texturePath)
+bool Material::Init(ID3D12Device* device, ID3D12CommandQueue* commandQueue, const wchar_t* texturePath, uint32_t sampleCount)
 {
     m_lastInitFailureStage = InitFailureStage::None;
+    m_sampleCount = sampleCount;
 
     if (!CreateRootSignature(device))
     {
@@ -479,7 +480,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     rasterizerDesc.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
     rasterizerDesc.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
     rasterizerDesc.DepthClipEnable = TRUE;
-    rasterizerDesc.MultisampleEnable = FALSE;
+    rasterizerDesc.MultisampleEnable = TRUE;
     rasterizerDesc.AntialiasedLineEnable = FALSE;
     rasterizerDesc.ForcedSampleCount = 0;
     rasterizerDesc.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
@@ -506,7 +507,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     psoDesc.NumRenderTargets = 1;
     psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-    psoDesc.SampleDesc.Count = 1;
+    psoDesc.SampleDesc.Count = m_sampleCount;
     psoDesc.SampleDesc.Quality = 0;
 
     if (FAILED(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_pipelineState))))

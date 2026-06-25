@@ -20,7 +20,7 @@ public:
     Material() = default;
     ~Material();
 
-    bool Init(ID3D12Device* device, ID3D12CommandQueue* commandQueue, const wchar_t* texturePath = nullptr);
+    bool Init(ID3D12Device* device, ID3D12CommandQueue* commandQueue, const wchar_t* texturePath = nullptr, uint32_t sampleCount = 1);
     void Shutdown();
 
     ID3D12PipelineState* GetPipelineState() const { return m_pipelineState.Get(); }
@@ -34,6 +34,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_texture;
     InitFailureStage m_lastInitFailureStage = InitFailureStage::None;
+    uint32_t m_sampleCount = 1;
 
     bool CreateRootSignature(ID3D12Device* device);
     bool CreatePipelineState(ID3D12Device* device);

@@ -11,6 +11,7 @@ struct FrameCameraData
     mat4 viewMatrix;
     mat4 projMatrix;
     mat4 lightViewProjMatrix;
+    D3D12_GPU_VIRTUAL_ADDRESS perFrameGpuAddr = 0;
 };
 
 class Entity

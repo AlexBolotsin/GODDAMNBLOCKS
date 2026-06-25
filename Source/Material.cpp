@@ -151,14 +151,12 @@ bool Material::CreateRootSignature(ID3D12Device* device)
     D3D12_ROOT_PARAMETER rootParams[3] = {};
     D3D12_DESCRIPTOR_RANGE descriptorRanges[1] = {};
 
-    D3D12_ROOT_CONSTANTS perFrameConstants = {};
-    perFrameConstants.Num32BitValues = 16 + 16 + 16; // view + projection + lightViewProj
-    perFrameConstants.ShaderRegister = 0;
-    perFrameConstants.RegisterSpace = 0;
-
-    rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    rootParams[0].Constants = perFrameConstants;
-    rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    // Per-frame data (view + proj + lightViewProj) lives in an upload buffer;
+    // use an inline root CBV (2 DWORDs) instead of 48 root constants to stay under the 64-DWORD limit.
+    rootParams[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParams[0].Descriptor.ShaderRegister = 0;
+    rootParams[0].Descriptor.RegisterSpace  = 0;
+    rootParams[0].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_CONSTANTS perObjectConstants = {};
     perObjectConstants.Num32BitValues = 16 + 4 + 4 + 4; // world + tint + render params + sprite uv rect

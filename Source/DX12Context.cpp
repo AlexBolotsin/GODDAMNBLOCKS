@@ -3,6 +3,7 @@
 #include "Camera.h"
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 namespace
 {
@@ -188,6 +189,32 @@ bool DX12Context::Init(HWND hwnd, uint32_t width, uint32_t height)
     {
         OutputDebugStringA("DX12Context::Init failed in CreateShadowPipeline\n");
         return false;
+    }
+
+    // Per-frame constant buffer: view + proj + lightViewProj (48 floats, 256-byte aligned per frame)
+    {
+        D3D12_HEAP_PROPERTIES uploadHeap = {};
+        uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+        D3D12_RESOURCE_DESC cbDesc = {};
+        cbDesc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+        cbDesc.Width            = 256 * FrameCount;
+        cbDesc.Height           = 1;
+        cbDesc.DepthOrArraySize = 1;
+        cbDesc.MipLevels        = 1;
+        cbDesc.Format           = DXGI_FORMAT_UNKNOWN;
+        cbDesc.SampleDesc.Count = 1;
+        cbDesc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+        if (FAILED(m_device->CreateCommittedResource(
+                &uploadHeap, D3D12_HEAP_FLAG_NONE, &cbDesc,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                IID_PPV_ARGS(&m_perFrameCb))))
+        {
+            OutputDebugStringA("DX12Context::Init failed to create per-frame constant buffer\n");
+            return false;
+        }
+        m_perFrameCb->Map(0, nullptr, reinterpret_cast<void**>(&m_perFrameCbMapped));
     }
 
     // Build light view-proj from the shadow direction used for rendering
@@ -919,6 +946,15 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
         frameData.viewMatrix          = MatrixLookAtRH(camera.eye, camera.target, vec3(0.0f, 1.0f, 0.0f));
         frameData.projMatrix          = MatrixPerspectiveRH(camera.fovY, aspect, camera.nearZ, camera.farZ);
         frameData.lightViewProjMatrix = m_lightViewProj;
+
+        // Write per-frame matrices into the current frame's slot of the upload CB
+        struct PerFrameCbData { mat4 view; mat4 proj; mat4 lightVP; };
+        PerFrameCbData cbData;
+        cbData.view    = frameData.viewMatrix;
+        cbData.proj    = frameData.projMatrix;
+        cbData.lightVP = frameData.lightViewProjMatrix;
+        memcpy(m_perFrameCbMapped + 256 * m_frameIndex, &cbData, sizeof(cbData));
+        frameData.perFrameGpuAddr = m_perFrameCb->GetGPUVirtualAddress() + 256 * m_frameIndex;
 
         for (auto &entity : scene->GetEntities())
         {

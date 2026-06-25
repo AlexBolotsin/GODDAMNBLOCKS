@@ -71,6 +71,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_shadowRootSig;
     mat4 m_lightViewProj;
 
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_perFrameCb;
+    uint8_t* m_perFrameCbMapped = nullptr;
+
     HANDLE m_fenceEvent = nullptr;
     uint64_t m_fenceValues[FrameCount] = {};
     uint32_t m_rtvDescriptorSize = 0;

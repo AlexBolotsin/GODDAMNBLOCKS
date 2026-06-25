@@ -268,22 +268,53 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         sprite.isBillboardActor = true;
         sprite.castsProjectedShadow = false;
         sprite.usesSpriteTexture = true;
-        sprite.spriteUVRect = MakeAtlasRect(
-            (i == 0) ? 24.0f : (i == 1) ? 47.0f : 114.0f,
-            7.0f,
-            19.0f,
-            24.0f,
-            SpriteSheetWidth,
-            SpriteSheetHeight);
         sprite.transform.SetPosition(-2.8f + i * 2.8f, 0.45f, -3.4f);
         sprite.transform.SetScale(1.1f, 1.5f, 1.0f);
         sprite.tint = vec4(1.0f, 1.0f, 1.0f, 1.0f);
         spriteActors.push_back(&sprite);
     }
 
+    // row_00
+    spriteActors[0]->animFrames = {
+        MakeAtlasRect(  2.0f,  8.0f, 18.0f, 23.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect( 24.0f,  7.0f, 19.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect( 47.0f,  7.0f, 19.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect( 70.0f,  8.0f, 18.0f, 23.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect( 92.0f,  8.0f, 19.0f, 23.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect(114.0f,  7.0f, 19.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect(138.0f,  7.0f, 17.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect(160.0f, 11.0f, 19.0f, 20.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect(209.0f,  7.0f, 18.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+    };
+    // row_02
+    spriteActors[1]->animFrames = {
+        MakeAtlasRect(  3.0f, 36.0f, 18.0f, 23.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect( 25.0f, 35.0f, 18.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect( 47.0f, 35.0f, 19.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect( 70.0f, 36.0f, 18.0f, 23.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect( 93.0f, 36.0f, 18.0f, 23.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect(114.0f, 35.0f, 19.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect(139.0f, 36.0f, 17.0f, 23.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect(160.0f, 40.0f, 19.0f, 19.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect(210.0f, 35.0f, 17.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+    };
+    // row_04
+    spriteActors[2]->animFrames = {
+        MakeAtlasRect(  2.0f, 64.0f, 18.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect( 25.0f, 64.0f, 18.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect( 47.0f, 64.0f, 19.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect( 70.0f, 64.0f, 18.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect( 92.0f, 64.0f, 19.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect(114.0f, 64.0f, 19.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect(139.0f, 64.0f, 14.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect(159.0f, 69.0f, 20.0f, 19.0f, SpriteSheetWidth, SpriteSheetHeight),
+        MakeAtlasRect(210.0f, 64.0f, 17.0f, 24.0f, SpriteSheetWidth, SpriteSheetHeight),
+    };
+
     // -------------------- GAME LOOP -------------------
     bool running = true;
     const auto startTime = std::chrono::steady_clock::now();
+    auto prevTime = startTime;
     while (running)
     {
         if (!window.PumpMessages())
@@ -299,7 +330,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         }
 
         const auto now = std::chrono::steady_clock::now();
-        const float t = std::chrono::duration<float>(now - startTime).count();
+        const float t  = std::chrono::duration<float>(now - startTime).count();
+        const float dt = std::chrono::duration<float>(now - prevTime).count();
+        prevTime = now;
 
         for (size_t i = 0; i < cubeActors.size(); ++i)
         {
@@ -329,6 +362,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
             const float y = 0.45f + sinf(t * 1.45f + phase) * 0.18f;
             const float z = -3.4f + cosf(t * 0.70f + phase) * 0.20f;
             sprite->transform.SetPosition(x, y, z);
+        }
+
+        for (Entity* sprite : spriteActors)
+        {
+            if (!sprite || sprite->animFrames.empty())
+                continue;
+
+            sprite->animTimer += dt;
+            const int frameIndex = static_cast<int>(sprite->animTimer * sprite->animSpeed)
+                                   % static_cast<int>(sprite->animFrames.size());
+            sprite->spriteUVRect = sprite->animFrames[frameIndex];
         }
 
         const float camAngle = t * 0.25f;

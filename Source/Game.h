@@ -1,5 +1,6 @@
 #pragma once
 #include "Camera.h"
+#include "InputState.h"
 #include "Scene.h"
 #include <memory>
 #include <vector>
@@ -13,7 +14,7 @@ class Game
 {
 public:
     bool Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spriteSheetPath);
-    void Update(float dt);
+    void Update(float dt, const InputState& input);
 
     Scene&        GetScene()           { return m_scene; }
     const Camera& GetCamera() const    { return m_camera; }
@@ -22,6 +23,10 @@ private:
     Scene    m_scene;
     Camera   m_camera;
     float    m_time = 0.0f;
+
+    float m_camAzimuth   = 0.0f;
+    float m_camElevation = 0.245f;
+    float m_camRadius    = 8.25f;
 
     std::shared_ptr<Mesh>     m_cubeMesh;
     std::shared_ptr<Mesh>     m_groundMesh;

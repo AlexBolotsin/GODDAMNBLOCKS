@@ -80,7 +80,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         const float dt = std::chrono::duration<float>(now - prevTime).count();
         prevTime = now;
 
-        game.Update(dt);
+        game.Update(dt, window.ConsumeInput());
 
         dx12.BeginFrame();
         dx12.RenderScene(&game.GetScene(), game.GetCamera());

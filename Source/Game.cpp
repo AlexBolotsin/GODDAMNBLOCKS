@@ -3,7 +3,9 @@
 #include "Mesh.h"
 #include "Material.h"
 #include "Entity.h"
+#include "InputState.h"
 #include <cmath>
+#include <algorithm>
 
 namespace
 {
@@ -121,6 +123,7 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
             OutputDebugStringW(L"Game::Init material failed in CreatePipelineState\n");
         return false;
     }
+    m_material->SetShadowMap(dx12.GetDevice(), dx12.GetShadowMap());
 
     // Ground plane
     {
@@ -206,11 +209,34 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
     return true;
 }
 
-void Game::Update(float dt)
+void Game::Update(float dt, const InputState& input)
 {
     m_time += dt;
     const float t = m_time;
 
+    // Orbit camera from mouse input
+    constexpr float kOrbitSensitivity = 0.005f;
+    constexpr float kZoomSensitivity  = 0.8f / 120.0f;
+    constexpr float kMinElevation     = 0.05f;
+    constexpr float kMaxElevation     = 1.50f;
+    constexpr float kMinRadius        = 1.5f;
+    constexpr float kMaxRadius        = 30.0f;
+
+    m_camAzimuth   += static_cast<float>(input.mouseDeltaX) * kOrbitSensitivity;
+    m_camElevation -= static_cast<float>(input.mouseDeltaY) * kOrbitSensitivity;
+    m_camElevation  = std::max(kMinElevation, std::min(kMaxElevation, m_camElevation));
+    m_camRadius    -= static_cast<float>(input.scrollDelta) * kZoomSensitivity;
+    m_camRadius     = std::max(kMinRadius, std::min(kMaxRadius, m_camRadius));
+
+    m_camera.target = vec3(0.0f, 0.0f, -5.0f);
+    const float cosEl = cosf(m_camElevation);
+    const float sinEl = sinf(m_camElevation);
+    m_camera.eye = vec3(
+        m_camera.target.x + cosf(m_camAzimuth) * cosEl * m_camRadius,
+        m_camera.target.y + sinEl * m_camRadius,
+        m_camera.target.z + sinf(m_camAzimuth) * cosEl * m_camRadius);
+
+    // Cube animation
     for (size_t i = 0; i < m_cubeActors.size(); ++i)
     {
         Entity* entity = m_cubeActors[i];
@@ -227,6 +253,7 @@ void Game::Update(float dt)
                              t * (0.7f + static_cast<float>(i) * 0.35f) + phase));
     }
 
+    // Sprite hover animation
     for (size_t i = 0; i < m_spriteActors.size(); ++i)
     {
         Entity* sprite = m_spriteActors[i];
@@ -240,6 +267,7 @@ void Game::Update(float dt)
             -3.4f + cosf(t * 0.70f + phase) * 0.20f);
     }
 
+    // Sprite frame animation
     for (Entity* sprite : m_spriteActors)
     {
         if (!sprite || sprite->animFrames.empty())
@@ -250,13 +278,4 @@ void Game::Update(float dt)
                                % static_cast<int>(sprite->animFrames.size());
         sprite->spriteUVRect = sprite->animFrames[frameIndex];
     }
-
-    const float camAngle  = t * 0.25f;
-    const float camRadius = 8.0f;
-    const float camHeight = 2.0f + sinf(t * 0.45f) * 0.35f;
-    m_camera.target = vec3(0.0f, 0.0f, -5.0f);
-    m_camera.eye    = vec3(
-        m_camera.target.x + cosf(camAngle) * camRadius,
-        camHeight,
-        m_camera.target.z + sinf(camAngle) * camRadius);
 }

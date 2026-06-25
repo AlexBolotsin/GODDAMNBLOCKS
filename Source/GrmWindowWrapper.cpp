@@ -78,6 +78,18 @@ bool GRMWindowWrapper::Init(HINSTANCE hInstance, const WindowDesc& desc)
     return true;
 }
 
+InputState GRMWindowWrapper::ConsumeInput()
+{
+    InputState state;
+    state.mouseDeltaX = m_mouseDeltaX;
+    state.mouseDeltaY = m_mouseDeltaY;
+    state.scrollDelta = m_scrollDelta;
+    m_mouseDeltaX = 0;
+    m_mouseDeltaY = 0;
+    m_scrollDelta = 0;
+    return state;
+}
+
 void GRMWindowWrapper::Shutdown()
 {
     ShowCursor(true);
@@ -190,8 +202,24 @@ LRESULT GRMWindowWrapper::HandleMessage(HWND hWnd, UINT message, WPARAM wParam, 
 
         case WM_INPUT:
         {
-            // Handle raw mouse input here if needed
+            UINT size = sizeof(RAWINPUT);
+            RAWINPUT raw = {};
+            if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam),
+                                RID_INPUT, &raw, &size, sizeof(RAWINPUTHEADER)) != static_cast<UINT>(-1))
+            {
+                if (raw.header.dwType == RIM_TYPEMOUSE)
+                {
+                    m_mouseDeltaX += raw.data.mouse.lLastX;
+                    m_mouseDeltaY += raw.data.mouse.lLastY;
+                }
+            }
             break;
+        }
+
+        case WM_MOUSEWHEEL:
+        {
+            m_scrollDelta += GET_WHEEL_DELTA_WPARAM(wParam);
+            return 0;
         }
 
         case WM_SYSKEYDOWN:
@@ -272,7 +300,7 @@ void GRMWindowWrapper::RegisterRawMouseInput()
     rid.dwFlags = RIDEV_INPUTSINK; // Receive input even when not in the foreground
     rid.hwndTarget = m_hWnd;
 
-    if (RegisterRawInputDevices(&rid, 1, sizeof(rid)) != 0)
+    if (!RegisterRawInputDevices(&rid, 1, sizeof(rid)))
     {
         OutputDebugStringW(L"Warning: failed to register raw mouse input.\n");
     }

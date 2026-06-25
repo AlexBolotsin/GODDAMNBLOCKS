@@ -4,6 +4,7 @@
 
 #include <string>
 #include <functional>
+#include "InputState.h"
 
 struct WindowDesc
 {
@@ -22,6 +23,8 @@ public:
 
     bool Init(HINSTANCE hInstance, const WindowDesc& desc);
     void Shutdown();
+
+    InputState ConsumeInput();
 
     bool PumpMessages();
 
@@ -62,6 +65,10 @@ private:
     bool m_isMinimized = false;
     bool m_isResizing = false;
     bool m_isFullScreen = false;
+
+    int m_mouseDeltaX = 0;
+    int m_mouseDeltaY = 0;
+    int m_scrollDelta = 0;
 
     static constexpr wchar_t CLASS_NAME[] = L"MazeGameWindow";
 

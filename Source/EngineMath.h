@@ -214,6 +214,17 @@ inline mat4 MatrixShadowProjection(float planeY, const vec3 &rayDir)
     return shadow;
 }
 
+inline mat4 MatrixOrthographicRH(float width, float height, float nearZ, float farZ)
+{
+    mat4 result;
+    result.m[0]  = 2.0f / width;
+    result.m[5]  = 2.0f / height;
+    result.m[10] = 1.0f / (nearZ - farZ);
+    result.m[14] = nearZ / (nearZ - farZ);
+    result.m[15] = 1.0f;
+    return result;
+}
+
 inline mat4 MatrixBillboard(const vec3 &position, const vec3 &scale, const vec3 &cameraEye)
 {
     vec3 toCamera = Vec3Normalize(cameraEye - position);

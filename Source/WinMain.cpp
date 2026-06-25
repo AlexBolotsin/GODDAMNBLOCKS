@@ -72,6 +72,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     bool  scanlinesKeyWasDown = false;
     bool  ditherEnabled       = false;
     bool  ditherKeyWasDown    = false;
+    bool  spaceKeyWasDown     = false;
     while (true)
     {
         if (!window.PumpMessages())
@@ -111,7 +112,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         ditherKeyWasDown = ditherKeyDown;
         dx12.SetDitherEnabled(ditherEnabled);
 
-        game.Update(dt, window.ConsumeInput());
+        InputState input       = window.ConsumeInput();
+        const bool spaceDown   = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+        input.cinematicToggled = spaceDown && !spaceKeyWasDown;
+        spaceKeyWasDown        = spaceDown;
+        game.Update(dt, input);
 
         dx12.BeginFrame();
         dx12.RenderScene(&game.GetScene(), game.GetCamera());

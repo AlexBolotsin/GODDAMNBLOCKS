@@ -79,9 +79,11 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_shadowSpriteRootSig;
     mat4  m_lightViewProj;
     vec3  m_lightPos;
-    float m_fps              = 0.0f;
-    bool  m_scanlinesEnabled = false;
-    bool  m_ditherEnabled    = false;
+    float    m_fps              = 0.0f;
+    bool     m_scanlinesEnabled = false;
+    bool     m_ditherEnabled    = false;
+    uint32_t m_entityCount      = 0;
+    uint32_t m_drawCallCount    = 0;
 
     Microsoft::WRL::ComPtr<ID3D12Resource> m_perFrameCb;
     uint8_t* m_perFrameCbMapped = nullptr;

@@ -1029,7 +1029,7 @@ bool DX12Context::CreatePostProcessPipelines()
 Texture2D    hdrInput    : register(t0);
 Texture2D    bloomInput  : register(t1);
 SamplerState linearSmp   : register(s0);
-cbuffer PostCB : register(b0) { float2 texelSize; float2 _pad; float fps; float scanlinesEnabled; float ditherEnabled; float _pad2; };
+cbuffer PostCB : register(b0) { float2 texelSize; float2 _pad; float fps; float scanlinesEnabled; float ditherEnabled; float frameTimeMs; float entityCount; float drawCallCount; float2 _pad2; };
 
 struct PSInput { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 
@@ -1094,6 +1094,29 @@ int GetDigitBitmap(int d)
     return 0;
 }
 
+// Sample one pixel of a numDigits-wide integer display; relX/relY are relative to the number's top-left
+float SampleDigits(int value, int numDigits, int relX, int relY)
+{
+    const int SCALE  = 4;
+    const int CHAR_W = 3 * SCALE;
+    const int GAP    = 3;
+    const int SLOT   = CHAR_W + GAP;
+    const int CHAR_H = 5 * SCALE;
+    if (relX < 0 || relY < 0 || relY >= CHAR_H || relX >= numDigits * SLOT - GAP)
+        return 0.0f;
+    int charIdx = relX / SLOT;
+    int xInSlot = relX - charIdx * SLOT;
+    if (xInSlot >= CHAR_W || charIdx >= numDigits)
+        return 0.0f;
+    int exp = numDigits - charIdx - 1;
+    int div = (exp == 4) ? 10000 : (exp == 3) ? 1000 : (exp == 2) ? 100 : (exp == 1) ? 10 : 1;
+    int d   = (value / div) % 10;
+    int col = xInSlot / SCALE;
+    int row = relY / SCALE;
+    int bmp = GetDigitBitmap(d);
+    return float((bmp >> (14 - row * 3 - col)) & 1);
+}
+
 float4 PS_Tonemap(PSInput i) : SV_TARGET
 {
     float3 hdr   = hdrInput.Sample(linearSmp,  i.uv).rgb;
@@ -1125,41 +1148,31 @@ float4 PS_Tonemap(PSInput i) : SV_TARGET
         color = saturate(floor(color * 8.0f + bayerT) / 8.0f);
     }
 
-    // FPS counter overlay — 3x5 bitmap font at 4x scale, top-left corner
-    const int SCALE  = 4;
-    const int CHAR_W = 3 * SCALE;    // 12 screen px wide per digit
-    const int CHAR_H = 5 * SCALE;    // 20 screen px tall
-    const int GAP    = 3;            // px between digit slots
-    const int SLOT   = CHAR_W + GAP; // 15 px per slot
-    const int OX     = 8;
-    const int OY     = 8;
-
-    int px = (int)i.pos.x;
-    int py = (int)i.pos.y;
-    int rx = px - OX;
-    int ry = py - OY;
-
-    if (rx >= 0 && rx < 3 * SLOT - GAP && ry >= 0 && ry < CHAR_H)
+    // Stats overlay — 4 rows, dark box, top-left corner
+    // Row 0 yellow : FPS          (3 digits, 0-999)
+    // Row 1 cyan   : Frame time   (3 digits, ms)
+    // Row 2 green  : Entity count (5 digits)
+    // Row 3 orange : Draw calls   (5 digits)
     {
-        color *= 0.25f;
-
-        int charIdx = rx / SLOT;
-        int xInSlot = rx - charIdx * SLOT;
-
-        if (xInSlot < CHAR_W && charIdx >= 0 && charIdx < 3)
+        const int OX    = 8;
+        const int OY    = 8;
+        const int ROW_H = 24;  // 20px char + 4px gap
+        const int BOX_W = 80;
+        const int BOX_H = 4 * ROW_H - 4; // 92px — no trailing gap
+        int spx = (int)i.pos.x - OX;
+        int spy = (int)i.pos.y - OY;
+        if (spx >= 0 && spx < BOX_W && spy >= 0 && spy < BOX_H)
         {
-            int ifps = clamp((int)fps, 0, 999);
-            int d;
-            if      (charIdx == 0) d = ifps / 100;
-            else if (charIdx == 1) d = (ifps / 10) % 10;
-            else                   d = ifps % 10;
-
-            int col    = xInSlot / SCALE;
-            int row    = ry / SCALE;
-            int bitmap = GetDigitBitmap(d);
-            int bitPos = 14 - row * 3 - col;
-            if ((bitmap >> bitPos) & 1)
-                color = float3(1.0f, 0.95f, 0.0f);
+            color *= 0.20f;
+            float lit;
+            lit = SampleDigits(clamp((int)fps,           0, 999),   3, spx, spy - 0 * ROW_H);
+            if (lit > 0.5f) color = float3(1.00f, 0.95f, 0.00f); // yellow  — FPS
+            lit = SampleDigits(clamp((int)frameTimeMs,   0, 999),   3, spx, spy - 1 * ROW_H);
+            if (lit > 0.5f) color = float3(0.00f, 0.90f, 1.00f); // cyan    — ms
+            lit = SampleDigits(clamp((int)entityCount,   0, 99999), 5, spx, spy - 2 * ROW_H);
+            if (lit > 0.5f) color = float3(0.30f, 1.00f, 0.30f); // green   — entities
+            lit = SampleDigits(clamp((int)drawCallCount, 0, 99999), 5, spx, spy - 3 * ROW_H);
+            if (lit > 0.5f) color = float3(1.00f, 0.60f, 0.00f); // orange  — draw calls
         }
     }
 
@@ -1202,7 +1215,7 @@ float4 PS_Tonemap(PSInput i) : SV_TARGET
 
     D3D12_ROOT_PARAMETER rootParams[2] = {};
     rootParams[0].ParameterType            = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    rootParams[0].Constants.Num32BitValues = 8;
+    rootParams[0].Constants.Num32BitValues = 12;
     rootParams[0].Constants.ShaderRegister = 0;
     rootParams[0].ShaderVisibility         = D3D12_SHADER_VISIBILITY_PIXEL;
     rootParams[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -1378,6 +1391,9 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
     if (!scene)
         return;
 
+    m_entityCount   = static_cast<uint32_t>(scene->GetEntities().size());
+    m_drawCallCount = 0;
+
     // ---- Shadow pass -------------------------------------------------------
     // Shadow map enters RenderScene in DEPTH_WRITE (initial or restored at end of previous frame)
     {
@@ -1430,6 +1446,7 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
             }
 
             entity->mesh->Draw(m_commandList.Get());
+            ++m_drawCallCount;
         }
 
         D3D12_RESOURCE_BARRIER toSrv = {};
@@ -1484,10 +1501,12 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
                 const mat4 billboardWorld = MatrixBillboard(
                     entity->transform.position, entity->transform.scale, camera.eye);
                 entity->Draw(m_commandList.Get(), frameData, &billboardWorld, nullptr, false);
+                ++m_drawCallCount;
                 continue;
             }
 
             entity->Draw(m_commandList.Get(), frameData);
+            ++m_drawCallCount;
         }
     }
 
@@ -1627,11 +1646,17 @@ void DX12Context::EndFrame()
         m_commandList->SetPipelineState(m_tonemapPso.Get());
         m_commandList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         m_commandList->SetGraphicsRootDescriptorTable(1, hdrSrv); // t0=HDR, t1=bloomA (contiguous)
-        m_commandList->SetGraphicsRoot32BitConstants(0, 1, &m_fps, 4);
-        float scanlinesVal = m_scanlinesEnabled ? 1.0f : 0.0f;
-        float ditherVal    = m_ditherEnabled    ? 1.0f : 0.0f;
-        m_commandList->SetGraphicsRoot32BitConstants(0, 1, &scanlinesVal, 5);
-        m_commandList->SetGraphicsRoot32BitConstants(0, 1, &ditherVal,    6);
+        float scanlinesVal   = m_scanlinesEnabled ? 1.0f : 0.0f;
+        float ditherVal      = m_ditherEnabled    ? 1.0f : 0.0f;
+        float frameTimeMs    = (m_fps > 0.0f) ? 1000.0f / m_fps : 0.0f;
+        float entityCountF   = static_cast<float>(m_entityCount);
+        float drawCallCountF = static_cast<float>(m_drawCallCount);
+        m_commandList->SetGraphicsRoot32BitConstants(0, 1, &m_fps,          4);
+        m_commandList->SetGraphicsRoot32BitConstants(0, 1, &scanlinesVal,   5);
+        m_commandList->SetGraphicsRoot32BitConstants(0, 1, &ditherVal,      6);
+        m_commandList->SetGraphicsRoot32BitConstants(0, 1, &frameTimeMs,    7);
+        m_commandList->SetGraphicsRoot32BitConstants(0, 1, &entityCountF,   8);
+        m_commandList->SetGraphicsRoot32BitConstants(0, 1, &drawCallCountF, 9);
         DrawFS(fw, fh);
     }
     {

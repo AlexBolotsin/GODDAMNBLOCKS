@@ -22,7 +22,9 @@ public:
 private:
     Scene    m_scene;
     Camera   m_camera;
-    float    m_time = 0.0f;
+    float    m_time          = 0.0f;
+    bool     m_cinematicMode = false;
+    float    m_cinematicTime = 0.0f;
 
     float m_camAzimuth   = 0.0f;
     float m_camElevation = 0.245f;

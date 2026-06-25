@@ -282,7 +282,9 @@ void Game::Update(float dt, const InputState& input)
     m_time += dt;
     const float t = m_time;
 
-    // Orbit camera from mouse input
+    if (input.cinematicToggled)
+        m_cinematicMode = !m_cinematicMode;
+
     constexpr float kOrbitSensitivity = 0.005f;
     constexpr float kZoomSensitivity  = 0.8f / 120.0f;
     constexpr float kMinElevation     = 0.05f;
@@ -290,13 +292,32 @@ void Game::Update(float dt, const InputState& input)
     constexpr float kMinRadius        = 1.5f;
     constexpr float kMaxRadius        = 30.0f;
 
-    m_camAzimuth   += static_cast<float>(input.mouseDeltaX) * kOrbitSensitivity;
-    m_camElevation -= static_cast<float>(input.mouseDeltaY) * kOrbitSensitivity;
-    m_camElevation  = std::max(kMinElevation, std::min(kMaxElevation, m_camElevation));
-    m_camRadius    -= static_cast<float>(input.scrollDelta) * kZoomSensitivity;
-    m_camRadius     = std::max(kMinRadius, std::min(kMaxRadius, m_camRadius));
+    if (m_cinematicMode)
+    {
+        m_cinematicTime += dt;
+        const float ct = m_cinematicTime;
 
-    m_camera.target = vec3(0.0f, 0.0f, -5.0f);
+        // Continuous slow orbit — different periods so the framing never repeats
+        m_camAzimuth   = ct * 0.14f;
+        m_camElevation = 0.08f + 0.55f * (0.5f + 0.5f * sinf(ct * 0.23f));
+        m_camRadius    = 7.0f  + 14.0f * (0.5f + 0.5f * sinf(ct * 0.17f));
+
+        // Target wanders across the crowd to survey different sections
+        m_camera.target = vec3(
+            sinf(ct * 0.09f) * 22.0f,
+            0.0f,
+            -5.0f + cosf(ct * 0.07f) * 22.0f);
+    }
+    else
+    {
+        m_camAzimuth   += static_cast<float>(input.mouseDeltaX) * kOrbitSensitivity;
+        m_camElevation -= static_cast<float>(input.mouseDeltaY) * kOrbitSensitivity;
+        m_camElevation  = std::max(kMinElevation, std::min(kMaxElevation, m_camElevation));
+        m_camRadius    -= static_cast<float>(input.scrollDelta) * kZoomSensitivity;
+        m_camRadius     = std::max(kMinRadius, std::min(kMaxRadius, m_camRadius));
+        m_camera.target = vec3(0.0f, 0.0f, -5.0f);
+    }
+
     const float cosEl = cosf(m_camElevation);
     const float sinEl = sinf(m_camElevation);
     m_camera.eye = vec3(

@@ -65,6 +65,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     }
 
     auto prevTime = std::chrono::steady_clock::now();
+    float fpsAccum   = 0.0f;
+    int   fpsCount   = 0;
+    float fpsCurrent = 0.0f;
     while (true)
     {
         if (!window.PumpMessages())
@@ -79,6 +82,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         const auto now = std::chrono::steady_clock::now();
         const float dt = std::chrono::duration<float>(now - prevTime).count();
         prevTime = now;
+
+        fpsAccum += dt;
+        ++fpsCount;
+        if (fpsAccum >= 0.25f)
+        {
+            fpsCurrent = fpsCount / fpsAccum;
+            fpsAccum   = 0.0f;
+            fpsCount   = 0;
+        }
+        dx12.SetFPS(fpsCurrent);
 
         game.Update(dt, window.ConsumeInput());
 

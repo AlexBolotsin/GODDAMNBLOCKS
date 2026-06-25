@@ -29,6 +29,7 @@ public:
     ID3D12CommandQueue* GetCommandQueue() const { return m_commandQueue.Get(); }
     uint32_t GetMsaaSampleCount() const { return m_msaaSampleCount; }
     ID3D12Resource* GetShadowMap() const { return m_shadowMap.Get(); }
+    void SetFPS(float fps) { m_fps = fps; }
 
 private:
     void LogAllAdapters();
@@ -74,8 +75,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_shadowRootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_shadowSpritePso;
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_shadowSpriteRootSig;
-    mat4 m_lightViewProj;
-    vec3 m_lightPos;
+    mat4  m_lightViewProj;
+    vec3  m_lightPos;
+    float m_fps = 0.0f;
 
     Microsoft::WRL::ComPtr<ID3D12Resource> m_perFrameCb;
     uint8_t* m_perFrameCbMapped = nullptr;

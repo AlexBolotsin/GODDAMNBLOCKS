@@ -1029,7 +1029,7 @@ bool DX12Context::CreatePostProcessPipelines()
 Texture2D    hdrInput    : register(t0);
 Texture2D    bloomInput  : register(t1);
 SamplerState linearSmp   : register(s0);
-cbuffer BlurCB : register(b0) { float2 texelSize; float2 _pad; };
+cbuffer PostCB : register(b0) { float2 texelSize; float2 _pad; float fps; float3 _pad2; };
 
 struct PSInput { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 
@@ -1079,11 +1079,66 @@ float4 PS_BlurV(PSInput i) : SV_TARGET
 
 float3 ACESFilm(float3 x) { return saturate((x*(2.51f*x+0.03f))/(x*(2.43f*x+0.59f)+0.14f)); }
 
+int GetDigitBitmap(int d)
+{
+    if (d == 0) return 31599;
+    if (d == 1) return 11415;
+    if (d == 2) return 29671;
+    if (d == 3) return 29647;
+    if (d == 4) return 23497;
+    if (d == 5) return 31183;
+    if (d == 6) return 31215;
+    if (d == 7) return 29257;
+    if (d == 8) return 31727;
+    if (d == 9) return 31695;
+    return 0;
+}
+
 float4 PS_Tonemap(PSInput i) : SV_TARGET
 {
     float3 hdr   = hdrInput.Sample(linearSmp,  i.uv).rgb;
     float3 bloom = bloomInput.Sample(linearSmp, i.uv).rgb;
-    return float4(ACESFilm(hdr + bloom * 0.07f), 1.0f);
+    float3 color = ACESFilm(hdr + bloom * 0.07f);
+
+    // FPS counter overlay — 3x5 bitmap font at 4x scale, top-left corner
+    const int SCALE  = 4;
+    const int CHAR_W = 3 * SCALE;    // 12 screen px wide per digit
+    const int CHAR_H = 5 * SCALE;    // 20 screen px tall
+    const int GAP    = 3;            // px between digit slots
+    const int SLOT   = CHAR_W + GAP; // 15 px per slot
+    const int OX     = 8;
+    const int OY     = 8;
+
+    int px = (int)i.pos.x;
+    int py = (int)i.pos.y;
+    int rx = px - OX;
+    int ry = py - OY;
+
+    if (rx >= 0 && rx < 3 * SLOT - GAP && ry >= 0 && ry < CHAR_H)
+    {
+        color *= 0.25f;
+
+        int charIdx = rx / SLOT;
+        int xInSlot = rx - charIdx * SLOT;
+
+        if (xInSlot < CHAR_W && charIdx >= 0 && charIdx < 3)
+        {
+            int ifps = clamp((int)fps, 0, 999);
+            int d;
+            if      (charIdx == 0) d = ifps / 100;
+            else if (charIdx == 1) d = (ifps / 10) % 10;
+            else                   d = ifps % 10;
+
+            int col    = xInSlot / SCALE;
+            int row    = ry / SCALE;
+            int bitmap = GetDigitBitmap(d);
+            int bitPos = 14 - row * 3 - col;
+            if ((bitmap >> bitPos) & 1)
+                color = float3(1.0f, 0.95f, 0.0f);
+        }
+    }
+
+    return float4(color, 1.0f);
 }
 )";
 
@@ -1122,7 +1177,7 @@ float4 PS_Tonemap(PSInput i) : SV_TARGET
 
     D3D12_ROOT_PARAMETER rootParams[2] = {};
     rootParams[0].ParameterType            = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    rootParams[0].Constants.Num32BitValues = 4;
+    rootParams[0].Constants.Num32BitValues = 8;
     rootParams[0].Constants.ShaderRegister = 0;
     rootParams[0].ShaderVisibility         = D3D12_SHADER_VISIBILITY_PIXEL;
     rootParams[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -1547,6 +1602,7 @@ void DX12Context::EndFrame()
         m_commandList->SetPipelineState(m_tonemapPso.Get());
         m_commandList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         m_commandList->SetGraphicsRootDescriptorTable(1, hdrSrv); // t0=HDR, t1=bloomA (contiguous)
+        m_commandList->SetGraphicsRoot32BitConstants(0, 1, &m_fps, 4); // fps at cbuffer slot 4
         DrawFS(fw, fh);
     }
     {

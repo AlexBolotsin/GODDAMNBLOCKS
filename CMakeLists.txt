@@ -20,17 +20,20 @@ set(SOURCES
     Source/Material.cpp
     Source/Entity.cpp
     Source/Scene.cpp
+    Source/Game.cpp
 )
- 
+
 set(HEADERS
     Source/GrmWindowWrapper.h
     Source/DX12Context.h
     Source/EngineMath.h
+    Source/Camera.h
     Source/Transform.h
     Source/Mesh.h
     Source/Material.h
     Source/Entity.h
     Source/Scene.h
+    Source/Game.h
 )
 
 # ---------------------------------------------------------------
@@ -85,6 +88,13 @@ if (MSVC)
         VC_EXTRA_WARNINGS
     )
 endif()
+
+add_custom_command(TARGET MazeGame POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/Source/Shaders"
+        "$<TARGET_FILE_DIR:MazeGame>/Shaders"
+    COMMENT "Copying shaders"
+)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Source/pch.h")
     message(STATUS "PCH found: ${CMAKE_CURRENT_SOURCE_DIR}/Source/pch.h")

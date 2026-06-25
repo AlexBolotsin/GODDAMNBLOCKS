@@ -1,5 +1,6 @@
 #include "DX12Context.h"
 #include "Scene.h"
+#include "Camera.h"
 #include <cmath>
 #include <cstdio>
 
@@ -104,154 +105,6 @@ namespace
         OutputDebugStringA(buffer);
     }
 
-    vec3 Vec3Sub(const vec3 &a, const vec3 &b)
-    {
-        return vec3(a.x - b.x, a.y - b.y, a.z - b.z);
-    }
-
-    float Vec3Dot(const vec3 &a, const vec3 &b)
-    {
-        return a.x * b.x + a.y * b.y + a.z * b.z;
-    }
-
-    vec3 Vec3Cross(const vec3 &a, const vec3 &b)
-    {
-        return vec3(
-            a.y * b.z - a.z * b.y,
-            a.z * b.x - a.x * b.z,
-            a.x * b.y - a.y * b.x);
-    }
-
-    vec3 Vec3Normalize(const vec3 &v)
-    {
-        const float lenSq = v.x * v.x + v.y * v.y + v.z * v.z;
-        if (lenSq <= 1e-12f)
-            return vec3(0.0f, 0.0f, 0.0f);
-
-        const float invLen = 1.0f / sqrtf(lenSq);
-        return vec3(v.x * invLen, v.y * invLen, v.z * invLen);
-    }
-
-    mat4 BuildLookAtRH(const vec3 &eye, const vec3 &target, const vec3 &up)
-    {
-        const vec3 zAxis = Vec3Normalize(Vec3Sub(eye, target));
-        const vec3 xAxis = Vec3Normalize(Vec3Cross(up, zAxis));
-        const vec3 yAxis = Vec3Cross(zAxis, xAxis);
-
-        mat4 view;
-        view.m[0] = xAxis.x;
-        view.m[1] = yAxis.x;
-        view.m[2] = zAxis.x;
-        view.m[3] = 0.0f;
-
-        view.m[4] = xAxis.y;
-        view.m[5] = yAxis.y;
-        view.m[6] = zAxis.y;
-        view.m[7] = 0.0f;
-
-        view.m[8] = xAxis.z;
-        view.m[9] = yAxis.z;
-        view.m[10] = zAxis.z;
-        view.m[11] = 0.0f;
-
-        view.m[12] = -Vec3Dot(xAxis, eye);
-        view.m[13] = -Vec3Dot(yAxis, eye);
-        view.m[14] = -Vec3Dot(zAxis, eye);
-        view.m[15] = 1.0f;
-
-        return view;
-    }
-
-    mat4 BuildPerspectiveRH(float fovYRadians, float aspect, float nearZ, float farZ)
-    {
-        mat4 result;
-
-        const float f = 1.0f / tanf(fovYRadians * 0.5f);
-        result.m[0] = f / aspect;
-        result.m[5] = f;
-        result.m[10] = farZ / (nearZ - farZ);
-        result.m[11] = -1.0f;
-        result.m[14] = nearZ * farZ / (nearZ - farZ);
-        result.m[15] = 0.0f;
-
-        return result;
-    }
-
-    mat4 BuildDirectionalShadowProjection(float planeY, const vec3 &rayDir)
-    {
-        mat4 shadow;
-
-        const float safeY = (fabsf(rayDir.y) > 1e-4f) ? rayDir.y : -1e-4f;
-        const float kx = rayDir.x / safeY;
-        const float kz = rayDir.z / safeY;
-
-        shadow.m[0] = 1.0f;
-        shadow.m[4] = -kx;
-        shadow.m[8] = 0.0f;
-        shadow.m[12] = kx * planeY;
-
-        shadow.m[1] = 0.0f;
-        shadow.m[5] = 0.0f;
-        shadow.m[9] = 0.0f;
-        shadow.m[13] = planeY;
-
-        shadow.m[2] = 0.0f;
-        shadow.m[6] = -kz;
-        shadow.m[10] = 1.0f;
-        shadow.m[14] = kz * planeY;
-
-        shadow.m[3] = 0.0f;
-        shadow.m[7] = 0.0f;
-        shadow.m[11] = 0.0f;
-        shadow.m[15] = 1.0f;
-
-        return shadow;
-    }
-
-    mat4 BuildBillboardWorld(const vec3 &position, const vec3 &scale, const vec3 &cameraEye)
-    {
-        vec3 toCamera = Vec3Normalize(Vec3Sub(cameraEye, position));
-        if (toCamera.x == 0.0f && toCamera.y == 0.0f && toCamera.z == 0.0f)
-            toCamera = vec3(0.0f, 0.0f, 1.0f);
-
-        const vec3 worldUp(0.0f, 1.0f, 0.0f);
-        vec3 right = Vec3Cross(worldUp, toCamera);
-        if (Vec3Dot(right, right) <= 1e-8f)
-            right = vec3(1.0f, 0.0f, 0.0f);
-        else
-            right = Vec3Normalize(right);
-
-        vec3 up = Vec3Normalize(Vec3Cross(toCamera, right));
-
-        mat4 world;
-        world.m[0] = right.x * scale.x;
-        world.m[1] = right.y * scale.x;
-        world.m[2] = right.z * scale.x;
-        world.m[3] = 0.0f;
-
-        world.m[4] = up.x * scale.y;
-        world.m[5] = up.y * scale.y;
-        world.m[6] = up.z * scale.y;
-        world.m[7] = 0.0f;
-
-        world.m[8] = toCamera.x * scale.z;
-        world.m[9] = toCamera.y * scale.z;
-        world.m[10] = toCamera.z * scale.z;
-        world.m[11] = 0.0f;
-
-        world.m[12] = position.x;
-        world.m[13] = position.y;
-        world.m[14] = position.z;
-        world.m[15] = 1.0f;
-
-        return world;
-    }
-}
-
-void DX12Context::SetCamera(const vec3 &eye, const vec3 &target)
-{
-    m_cameraEye = eye;
-    m_cameraTarget = target;
 }
 
 DX12Context::~DX12Context()
@@ -839,15 +692,15 @@ void DX12Context::BeginFrame()
     m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 }
 
-void DX12Context::RenderScene(Scene *scene)
+void DX12Context::RenderScene(Scene *scene, const Camera &camera)
 {
     if (!scene)
         return;
 
     const float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : (16.0f / 9.0f);
     FrameCameraData frameData;
-    frameData.viewMatrix = BuildLookAtRH(m_cameraEye, m_cameraTarget, vec3(0.0f, 1.0f, 0.0f));
-    frameData.projMatrix = BuildPerspectiveRH(1.0471976f, aspect, 0.1f, 100.0f);
+    frameData.viewMatrix = MatrixLookAtRH(camera.eye, camera.target, vec3(0.0f, 1.0f, 0.0f));
+    frameData.projMatrix = MatrixPerspectiveRH(camera.fovY, aspect, camera.nearZ, camera.farZ);
 
     for (auto &entity : scene->GetEntities())
     {
@@ -856,7 +709,7 @@ void DX12Context::RenderScene(Scene *scene)
 
         if (entity->isBillboardActor)
         {
-            const mat4 billboardWorld = BuildBillboardWorld(entity->transform.position, entity->transform.scale, m_cameraEye);
+            const mat4 billboardWorld = MatrixBillboard(entity->transform.position, entity->transform.scale, camera.eye);
             entity->Draw(m_commandList.Get(), frameData, &billboardWorld, nullptr, false);
             continue;
         }
@@ -864,11 +717,9 @@ void DX12Context::RenderScene(Scene *scene)
         entity->Draw(m_commandList.Get(), frameData);
     }
 
-    // Projected soft shadows onto ground plane (index 0 entity).
-    // Keep projected shadows slightly above the floor to avoid depth z-fighting.
     const float groundPlaneY = -0.985f;
     const vec3 shadowRayDir = Vec3Normalize(vec3(-0.40f, -0.95f, -0.55f));
-    const mat4 shadowProj = BuildDirectionalShadowProjection(groundPlaneY, shadowRayDir);
+    const mat4 shadowProj = MatrixShadowProjection(groundPlaneY, shadowRayDir);
 
     const vec4 shadowTints[] =
         {

@@ -947,12 +947,14 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
         frameData.projMatrix          = MatrixPerspectiveRH(camera.fovY, aspect, camera.nearZ, camera.farZ);
         frameData.lightViewProjMatrix = m_lightViewProj;
 
-        // Write per-frame matrices into the current frame's slot of the upload CB
-        struct PerFrameCbData { mat4 view; mat4 proj; mat4 lightVP; };
+        // Write per-frame data into the current frame's slot of the upload CB
+        struct PerFrameCbData { mat4 view; mat4 proj; mat4 lightVP; vec3 cameraEye; float pad; };
         PerFrameCbData cbData;
-        cbData.view    = frameData.viewMatrix;
-        cbData.proj    = frameData.projMatrix;
-        cbData.lightVP = frameData.lightViewProjMatrix;
+        cbData.view      = frameData.viewMatrix;
+        cbData.proj      = frameData.projMatrix;
+        cbData.lightVP   = frameData.lightViewProjMatrix;
+        cbData.cameraEye = camera.eye;
+        cbData.pad       = 0.0f;
         memcpy(m_perFrameCbMapped + 256 * m_frameIndex, &cbData, sizeof(cbData));
         frameData.perFrameGpuAddr = m_perFrameCb->GetGPUVirtualAddress() + 256 * m_frameIndex;
 

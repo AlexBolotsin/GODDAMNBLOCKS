@@ -3,6 +3,8 @@ cbuffer PerObject : register(b0)
     row_major float4x4 viewMatrix;
     row_major float4x4 projMatrix;
     row_major float4x4 lightViewProjMatrix;
+    float3 cameraEyeWS;
+    float  _pad;
 };
 
 cbuffer PerDraw : register(b1)
@@ -152,6 +154,14 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 diffuseLighting = keyColor * (0.10f + keyBand * 0.75f * shadowFactor) + fillColor * (fillBand * 0.30f);
     float3 litColor = baseColor * (ambientColor + diffuseLighting);
     litColor *= (1.0f - edgeBand * 0.14f);
+
+    // Blinn-Phong specular on key light (suppressed on floor tiles)
+    float3 viewDirWS = normalize(cameraEyeWS - input.worldPos);
+    float3 halfVec   = normalize(keyToLight + viewDirWS);
+    float  NdotH     = saturate(dot(normalWS, halfVec));
+    float  spec      = pow(NdotH, 48.0f) * 0.50f * (1.0f - floorMask * 0.85f) * shadowFactor;
+    litColor        += keyColor * spec;
+
     litColor = min(litColor, float3(1.0f, 1.0f, 1.0f));
 
     float cameraDistance = length(input.viewPos);

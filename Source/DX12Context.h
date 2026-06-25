@@ -43,6 +43,8 @@ private:
     bool CreateFenceAndEvent();
     bool CreateShadowMapResources();
     bool CreateShadowPipeline();
+    bool CreatePostProcessResources();
+    bool CreatePostProcessPipelines();
     void WaitForGpu();
     void MoveToNextFrame();
 
@@ -73,6 +75,20 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D12Resource> m_perFrameCb;
     uint8_t* m_perFrameCbMapped = nullptr;
+
+    // Post-process / HDR / bloom
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_hdrTarget;   // R16G16B16A16_FLOAT, full-res
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_bloomA;      // R16G16B16A16_FLOAT, half-res
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_bloomB;      // R16G16B16A16_FLOAT, half-res
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_postRtvHeap; // 3 RTVs: hdr, bloomA, bloomB
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_postSrvHeap; // 4 SRVs (shader-visible)
+    Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_postRootSig;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_brightPassPso;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_blurHPso;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_blurVPso;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_tonemapPso;
+    uint32_t m_bloomWidth  = 0;
+    uint32_t m_bloomHeight = 0;
 
     HANDLE m_fenceEvent = nullptr;
     uint64_t m_fenceValues[FrameCount] = {};

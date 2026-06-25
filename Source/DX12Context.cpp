@@ -127,13 +127,13 @@ bool DX12Context::Init(HWND hwnd, uint32_t width, uint32_t height)
 
     m_msaaSampleCount = FindHighestCommonSampleCount(
         m_device.Get(),
-        DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
         m_depthStencilFormat,
         requestedMsaaSampleCount);
 
     LogMsaaSupport(
         m_device.Get(),
-        DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
         m_depthStencilFormat,
         requestedMsaaSampleCount,
         m_msaaSampleCount);
@@ -188,6 +188,18 @@ bool DX12Context::Init(HWND hwnd, uint32_t width, uint32_t height)
     if (!CreateShadowPipeline())
     {
         OutputDebugStringA("DX12Context::Init failed in CreateShadowPipeline\n");
+        return false;
+    }
+
+    if (!CreatePostProcessResources())
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreatePostProcessResources\n");
+        return false;
+    }
+
+    if (!CreatePostProcessPipelines())
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreatePostProcessPipelines\n");
         return false;
     }
 
@@ -460,7 +472,7 @@ bool DX12Context::CreateRenderTargetViews()
     msaaDesc.Height = m_height;
     msaaDesc.DepthOrArraySize = 1;
     msaaDesc.MipLevels = 1;
-    msaaDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    msaaDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     msaaDesc.SampleDesc.Count = m_msaaSampleCount;
     msaaDesc.SampleDesc.Quality = 0;
     msaaDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -777,6 +789,259 @@ float4 VSMain(float3 position : POSITION) : SV_POSITION
     return true;
 }
 
+bool DX12Context::CreatePostProcessResources()
+{
+    m_hdrTarget.Reset();
+    m_bloomA.Reset();
+    m_bloomB.Reset();
+    m_postRtvHeap.Reset();
+    m_postSrvHeap.Reset();
+
+    m_bloomWidth  = (m_width  > 1) ? m_width  / 2 : 1;
+    m_bloomHeight = (m_height > 1) ? m_height / 2 : 1;
+
+    D3D12_HEAP_PROPERTIES defaultHeap = {};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    auto MakeTexDesc = [](UINT64 w, UINT h) {
+        D3D12_RESOURCE_DESC d = {};
+        d.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        d.Width            = w;
+        d.Height           = h;
+        d.DepthOrArraySize = 1;
+        d.MipLevels        = 1;
+        d.Format           = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        d.SampleDesc.Count = 1;
+        d.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        d.Flags            = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        return d;
+    };
+
+    D3D12_RESOURCE_DESC hdrDesc   = MakeTexDesc(m_width,      m_height);
+    D3D12_RESOURCE_DESC bloomDesc = MakeTexDesc(m_bloomWidth,  m_bloomHeight);
+
+    auto Create = [&](const D3D12_RESOURCE_DESC& desc, Microsoft::WRL::ComPtr<ID3D12Resource>& out, const wchar_t* name) {
+        if (FAILED(m_device->CreateCommittedResource(
+                &defaultHeap, D3D12_HEAP_FLAG_NONE, &desc,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+                IID_PPV_ARGS(&out))))
+            return false;
+        out->SetName(name);
+        return true;
+    };
+
+    if (!Create(hdrDesc,   m_hdrTarget, L"HDR Target")) return false;
+    if (!Create(bloomDesc, m_bloomA,    L"Bloom A"))    return false;
+    if (!Create(bloomDesc, m_bloomB,    L"Bloom B"))    return false;
+
+    // Post-process RTV heap (3 descriptors)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+        hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        hd.NumDescriptors = 3;
+        if (FAILED(m_device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_postRtvHeap))))
+            return false;
+
+        const UINT sz = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_postRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        m_device->CreateRenderTargetView(m_hdrTarget.Get(), nullptr, h); h.ptr += sz;
+        m_device->CreateRenderTargetView(m_bloomA.Get(),    nullptr, h); h.ptr += sz;
+        m_device->CreateRenderTargetView(m_bloomB.Get(),    nullptr, h);
+    }
+
+    // Post-process SRV heap (4 slots: hdr, bloomA, bloomB, hdr-duplicate for safe t1 on blur passes)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+        hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.NumDescriptors = 4;
+        hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (FAILED(m_device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_postSrvHeap))))
+            return false;
+
+        const UINT sz = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_postSrvHeap->GetCPUDescriptorHandleForHeapStart();
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format                  = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MipLevels     = 1;
+
+        m_device->CreateShaderResourceView(m_hdrTarget.Get(), &srvDesc, h); h.ptr += sz; // slot 0: HDR
+        m_device->CreateShaderResourceView(m_bloomA.Get(),    &srvDesc, h); h.ptr += sz; // slot 1: bloomA
+        m_device->CreateShaderResourceView(m_bloomB.Get(),    &srvDesc, h); h.ptr += sz; // slot 2: bloomB
+        m_device->CreateShaderResourceView(m_hdrTarget.Get(), &srvDesc, h);              // slot 3: HDR dup (safe t1 for blur-V)
+    }
+
+    return true;
+}
+
+bool DX12Context::CreatePostProcessPipelines()
+{
+    static const char* kShader = R"(
+Texture2D    hdrInput    : register(t0);
+Texture2D    bloomInput  : register(t1);
+SamplerState linearSmp   : register(s0);
+cbuffer BlurCB : register(b0) { float2 texelSize; float2 _pad; };
+
+struct PSInput { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+
+PSInput VSMain(uint vid : SV_VertexID)
+{
+    float2 p = float2((vid == 1) ? 3.0f : -1.0f, (vid == 2) ? -3.0f : 1.0f);
+    PSInput o;
+    o.pos = float4(p, 0.0f, 1.0f);
+    o.uv  = float2(p.x * 0.5f + 0.5f, p.y * -0.5f + 0.5f);
+    return o;
+}
+
+float4 PS_BrightPass(PSInput i) : SV_TARGET
+{
+    float3 c   = hdrInput.Sample(linearSmp, i.uv).rgb;
+    float  lum = dot(c, float3(0.2126f, 0.7152f, 0.0722f));
+    float  thr = 0.80f, knee = 0.20f;
+    float  rq  = clamp(lum - thr + knee, 0.0f, 2.0f * knee);
+    rq = (rq * rq) / (4.0f * knee + 1e-5f);
+    float  w   = max(rq, lum - thr) / max(lum, 1e-5f);
+    return float4(c * w, 1.0f);
+}
+
+static const float kW[5] = { 0.227027f, 0.194595f, 0.121622f, 0.054054f, 0.016216f };
+
+float4 PS_BlurH(PSInput i) : SV_TARGET
+{
+    float3 r = hdrInput.Sample(linearSmp, i.uv).rgb * kW[0];
+    [unroll] for (int j = 1; j <= 4; ++j) {
+        float2 o = float2(texelSize.x * j, 0.0f);
+        r += hdrInput.Sample(linearSmp, i.uv + o).rgb * kW[j];
+        r += hdrInput.Sample(linearSmp, i.uv - o).rgb * kW[j];
+    }
+    return float4(r, 1.0f);
+}
+
+float4 PS_BlurV(PSInput i) : SV_TARGET
+{
+    float3 r = hdrInput.Sample(linearSmp, i.uv).rgb * kW[0];
+    [unroll] for (int j = 1; j <= 4; ++j) {
+        float2 o = float2(0.0f, texelSize.y * j);
+        r += hdrInput.Sample(linearSmp, i.uv + o).rgb * kW[j];
+        r += hdrInput.Sample(linearSmp, i.uv - o).rgb * kW[j];
+    }
+    return float4(r, 1.0f);
+}
+
+float3 ACESFilm(float3 x) { return saturate((x*(2.51f*x+0.03f))/(x*(2.43f*x+0.59f)+0.14f)); }
+
+float4 PS_Tonemap(PSInput i) : SV_TARGET
+{
+    float3 hdr   = hdrInput.Sample(linearSmp,  i.uv).rgb;
+    float3 bloom = bloomInput.Sample(linearSmp, i.uv).rgb;
+    return float4(ACESFilm(hdr + bloom * 0.07f), 1.0f);
+}
+)";
+
+    UINT flags = 0;
+#if defined(_DEBUG)
+    flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+
+    Microsoft::WRL::ComPtr<ID3DBlob> vsBlob, bpBlob, bhBlob, bvBlob, tmBlob, errBlob;
+
+    auto Compile = [&](LPCSTR entry, LPCSTR target,
+                       Microsoft::WRL::ComPtr<ID3DBlob>& out) -> bool
+    {
+        errBlob.Reset();
+        HRESULT hr = D3DCompile(kShader, strlen(kShader), nullptr, nullptr, nullptr,
+                                entry, target, flags, 0, &out, &errBlob);
+        if (FAILED(hr)) {
+            if (errBlob) OutputDebugStringA(static_cast<const char*>(errBlob->GetBufferPointer()));
+            return false;
+        }
+        return true;
+    };
+
+    if (!Compile("VSMain",        "vs_5_0", vsBlob)) return false;
+    if (!Compile("PS_BrightPass", "ps_5_0", bpBlob)) return false;
+    if (!Compile("PS_BlurH",      "ps_5_0", bhBlob)) return false;
+    if (!Compile("PS_BlurV",      "ps_5_0", bvBlob)) return false;
+    if (!Compile("PS_Tonemap",    "ps_5_0", tmBlob)) return false;
+
+    // Root signature: 4 root constants (b0 blur texel size) + descriptor table (2 SRVs t0/t1)
+    D3D12_DESCRIPTOR_RANGE srvRange = {};
+    srvRange.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors     = 2;
+    srvRange.BaseShaderRegister = 0;
+    srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER rootParams[2] = {};
+    rootParams[0].ParameterType            = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rootParams[0].Constants.Num32BitValues = 4;
+    rootParams[0].Constants.ShaderRegister = 0;
+    rootParams[0].ShaderVisibility         = D3D12_SHADER_VISIBILITY_PIXEL;
+    rootParams[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[1].DescriptorTable.pDescriptorRanges   = &srvRange;
+    rootParams[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC samp = {};
+    samp.Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samp.ComparisonFunc   = D3D12_COMPARISON_FUNC_ALWAYS;
+    samp.MaxLOD           = D3D12_FLOAT32_MAX;
+    samp.ShaderRegister   = 0;
+    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC sigDesc = {};
+    sigDesc.NumParameters     = 2;
+    sigDesc.pParameters       = rootParams;
+    sigDesc.NumStaticSamplers = 1;
+    sigDesc.pStaticSamplers   = &samp;
+
+    Microsoft::WRL::ComPtr<ID3DBlob> sigBlob;
+    if (FAILED(D3D12SerializeRootSignature(&sigDesc, D3D_ROOT_SIGNATURE_VERSION_1, &sigBlob, &errBlob))) {
+        if (errBlob) OutputDebugStringA(static_cast<const char*>(errBlob->GetBufferPointer()));
+        return false;
+    }
+    if (FAILED(m_device->CreateRootSignature(0, sigBlob->GetBufferPointer(),
+                                             sigBlob->GetBufferSize(),
+                                             IID_PPV_ARGS(&m_postRootSig))))
+        return false;
+
+    // Shared PSO template (no IA, no depth, no MSAA, fullscreen triangle)
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = m_postRootSig.Get();
+    pso.VS             = { vsBlob->GetBufferPointer(), vsBlob->GetBufferSize() };
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.SampleMask                     = UINT_MAX;
+    pso.RasterizerState.FillMode       = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode       = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = FALSE;
+    pso.DepthStencilState.DepthEnable   = FALSE;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets      = 1;
+    pso.SampleDesc.Count      = 1;
+
+    // Bright pass + blur → R16G16B16A16_FLOAT (half-res bloom targets)
+    pso.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+    pso.PS = { bpBlob->GetBufferPointer(), bpBlob->GetBufferSize() };
+    if (FAILED(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_brightPassPso)))) return false;
+
+    pso.PS = { bhBlob->GetBufferPointer(), bhBlob->GetBufferSize() };
+    if (FAILED(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_blurHPso)))) return false;
+
+    pso.PS = { bvBlob->GetBufferPointer(), bvBlob->GetBufferSize() };
+    if (FAILED(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_blurVPso)))) return false;
+
+    // Tonemap → swap chain format (R8G8B8A8_UNORM)
+    pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pso.PS = { tmBlob->GetBufferPointer(), tmBlob->GetBufferSize() };
+    if (FAILED(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_tonemapPso)))) return false;
+
+    return true;
+}
+
 void DX12Context::WaitForGpu()
 {
     if (!m_commandQueue || !m_fence)
@@ -842,6 +1107,7 @@ void DX12Context::Resize(uint32_t width, uint32_t height)
     m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
     CreateRenderTargetViews();
     CreateDepthStencilBuffer();
+    CreatePostProcessResources();
 }
 
 void DX12Context::BeginFrame()
@@ -989,51 +1255,139 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
 
 void DX12Context::EndFrame()
 {
-    D3D12_RESOURCE_BARRIER barriers[2] = {};
+    // Helper: fill a transition barrier inline
+    auto Trans = [](ID3D12Resource* r, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+    {
+        D3D12_RESOURCE_BARRIER b = {};
+        b.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource   = r;
+        b.Transition.StateBefore = before;
+        b.Transition.StateAfter  = after;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        return b;
+    };
 
-    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barriers[0].Transition.pResource = m_msaaColorTarget.Get();
-    barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+    const UINT rtvSz = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    const UINT srvSz = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-    barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barriers[1].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barriers[1].Transition.pResource = m_renderTargets[m_frameIndex].Get();
-    barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_DEST;
+    D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv   = m_postRtvHeap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE bloomARtv = { hdrRtv.ptr + rtvSz };
+    D3D12_CPU_DESCRIPTOR_HANDLE bloomBRtv = { hdrRtv.ptr + rtvSz * 2 };
 
-    m_commandList->ResourceBarrier(2, barriers);
+    D3D12_GPU_DESCRIPTOR_HANDLE hdrSrv   = m_postSrvHeap->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE bloomASrv = { hdrSrv.ptr + srvSz };
+    D3D12_GPU_DESCRIPTOR_HANDLE bloomBSrv = { hdrSrv.ptr + srvSz * 2 };
 
-    m_commandList->ResolveSubresource(
-        m_renderTargets[m_frameIndex].Get(),
-        0,
-        m_msaaColorTarget.Get(),
-        0,
-        DXGI_FORMAT_R8G8B8A8_UNORM);
+    // 1. Resolve MSAA → HDR target (R16G16B16A16_FLOAT)
+    {
+        D3D12_RESOURCE_BARRIER b[2] = {
+            Trans(m_msaaColorTarget.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,        D3D12_RESOURCE_STATE_RESOLVE_SOURCE),
+            Trans(m_hdrTarget.Get(),       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RESOLVE_DEST),
+        };
+        m_commandList->ResourceBarrier(2, b);
+    }
+    m_commandList->ResolveSubresource(m_hdrTarget.Get(), 0,
+                                      m_msaaColorTarget.Get(), 0,
+                                      DXGI_FORMAT_R16G16B16A16_FLOAT);
+    {
+        D3D12_RESOURCE_BARRIER b[2] = {
+            Trans(m_msaaColorTarget.Get(), D3D12_RESOURCE_STATE_RESOLVE_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+            Trans(m_hdrTarget.Get(),       D3D12_RESOURCE_STATE_RESOLVE_DEST,   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+        };
+        m_commandList->ResourceBarrier(2, b);
+    }
 
-    D3D12_RESOURCE_BARRIER postBarriers[2] = {};
+    // Bind post-process state
+    ID3D12DescriptorHeap* postHeaps[] = { m_postSrvHeap.Get() };
+    m_commandList->SetDescriptorHeaps(1, postHeaps);
+    m_commandList->SetGraphicsRootSignature(m_postRootSig.Get());
 
-    postBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    postBarriers[0].Transition.pResource = m_renderTargets[m_frameIndex].Get();
-    postBarriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_DEST;
-    postBarriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-    postBarriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    auto DrawFS = [&](float w, float h)
+    {
+        D3D12_VIEWPORT vp     = { 0.0f, 0.0f, w, h, 0.0f, 1.0f };
+        D3D12_RECT     scissor = { 0, 0, static_cast<LONG>(w), static_cast<LONG>(h) };
+        m_commandList->RSSetViewports(1, &vp);
+        m_commandList->RSSetScissorRects(1, &scissor);
+        m_commandList->DrawInstanced(3, 1, 0, 0);
+    };
 
-    postBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    postBarriers[1].Transition.pResource = m_msaaColorTarget.Get();
-    postBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
-    postBarriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    postBarriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    const float fw = static_cast<float>(m_width);
+    const float fh = static_cast<float>(m_height);
+    const float bw = static_cast<float>(m_bloomWidth);
+    const float bh = static_cast<float>(m_bloomHeight);
 
-    m_commandList->ResourceBarrier(2, postBarriers);
+    // 2. Bright-pass: HDR → bloomA
+    {
+        D3D12_RESOURCE_BARRIER b = Trans(m_bloomA.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        m_commandList->ResourceBarrier(1, &b);
+    }
+    m_commandList->SetPipelineState(m_brightPassPso.Get());
+    m_commandList->OMSetRenderTargets(1, &bloomARtv, FALSE, nullptr);
+    m_commandList->SetGraphicsRootDescriptorTable(1, hdrSrv); // t0=HDR
+    DrawFS(bw, bh);
+    {
+        D3D12_RESOURCE_BARRIER b = Trans(m_bloomA.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        m_commandList->ResourceBarrier(1, &b);
+    }
+
+    // 3. Horizontal blur: bloomA → bloomB
+    {
+        D3D12_RESOURCE_BARRIER b = Trans(m_bloomB.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        m_commandList->ResourceBarrier(1, &b);
+    }
+    {
+        float tc[4] = { 1.0f / bw, 0.0f, 0.0f, 0.0f };
+        m_commandList->SetGraphicsRoot32BitConstants(0, 4, tc, 0);
+    }
+    m_commandList->SetPipelineState(m_blurHPso.Get());
+    m_commandList->OMSetRenderTargets(1, &bloomBRtv, FALSE, nullptr);
+    m_commandList->SetGraphicsRootDescriptorTable(1, bloomASrv); // t0=bloomA
+    DrawFS(bw, bh);
+    {
+        D3D12_RESOURCE_BARRIER b = Trans(m_bloomB.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        m_commandList->ResourceBarrier(1, &b);
+    }
+
+    // 4. Vertical blur: bloomB → bloomA
+    {
+        D3D12_RESOURCE_BARRIER b = Trans(m_bloomA.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        m_commandList->ResourceBarrier(1, &b);
+    }
+    {
+        float tc[4] = { 0.0f, 1.0f / bh, 0.0f, 0.0f };
+        m_commandList->SetGraphicsRoot32BitConstants(0, 4, tc, 0);
+    }
+    m_commandList->SetPipelineState(m_blurVPso.Get());
+    m_commandList->OMSetRenderTargets(1, &bloomARtv, FALSE, nullptr);
+    m_commandList->SetGraphicsRootDescriptorTable(1, bloomBSrv); // t0=bloomB
+    DrawFS(bw, bh);
+    {
+        D3D12_RESOURCE_BARRIER b = Trans(m_bloomA.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        m_commandList->ResourceBarrier(1, &b);
+    }
+
+    // 5. Tonemap + composite → swap chain (HDR t0, bloomA t1)
+    {
+        D3D12_RESOURCE_BARRIER b = Trans(m_renderTargets[m_frameIndex].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        m_commandList->ResourceBarrier(1, &b);
+    }
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        rtv.ptr += static_cast<SIZE_T>(m_frameIndex) * m_rtvDescriptorSize;
+        m_commandList->SetPipelineState(m_tonemapPso.Get());
+        m_commandList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        m_commandList->SetGraphicsRootDescriptorTable(1, hdrSrv); // t0=HDR, t1=bloomA (contiguous)
+        DrawFS(fw, fh);
+    }
+    {
+        D3D12_RESOURCE_BARRIER b = Trans(m_renderTargets[m_frameIndex].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+        m_commandList->ResourceBarrier(1, &b);
+    }
 
     if (FAILED(m_commandList->Close()))
         return;
 
-    ID3D12CommandList *commandLists[] = {m_commandList.Get()};
+    ID3D12CommandList* commandLists[] = { m_commandList.Get() };
     m_commandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
     m_swapChain->Present(1, 0);
     MoveToNextFrame();

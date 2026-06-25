@@ -151,18 +151,17 @@ float4 PSMain(PSInput input) : SV_TARGET
     float edgeBand = smoothstep(0.62f, 0.90f, 1.0f - ndotv);
 
     float shadowFactor = SampleShadow(input.worldPos);
-    float3 diffuseLighting = keyColor * (0.10f + keyBand * 0.75f * shadowFactor) + fillColor * (fillBand * 0.30f);
+    float3 diffuseLighting = keyColor * (0.10f + keyBand * 1.00f * shadowFactor) + fillColor * (fillBand * 0.30f);
     float3 litColor = baseColor * (ambientColor + diffuseLighting);
     litColor *= (1.0f - edgeBand * 0.14f);
 
-    // Blinn-Phong specular on key light (suppressed on floor tiles)
+    // Blinn-Phong specular — high peak so bright faces exceed 1.0 and bloom
     float3 viewDirWS = normalize(cameraEyeWS - input.worldPos);
     float3 halfVec   = normalize(keyToLight + viewDirWS);
     float  NdotH     = saturate(dot(normalWS, halfVec));
-    float  spec      = pow(NdotH, 48.0f) * 0.50f * (1.0f - floorMask * 0.85f) * shadowFactor;
+    float  spec      = pow(NdotH, 64.0f) * 2.50f * (1.0f - floorMask * 0.85f) * shadowFactor;
     litColor        += keyColor * spec;
-
-    litColor = min(litColor, float3(1.0f, 1.0f, 1.0f));
+    // No clamp — HDR values > 1.0 feed the bloom bright-pass
 
     float cameraDistance = length(input.viewPos);
     float fogStart = 8.0f;
@@ -176,6 +175,6 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 skyZenith = float3(0.24f, 0.38f, 0.62f);
     float3 fogColor = lerp(skyHorizon, skyZenith, skyT);
 
-    float3 finalColor = saturate(lerp(litColor, fogColor, fogFactor));
+    float3 finalColor = lerp(litColor, fogColor, fogFactor);
     return float4(finalColor, input.color.a);
 }

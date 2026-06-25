@@ -21,6 +21,7 @@ public:
     ~Material();
 
     bool Init(ID3D12Device* device, ID3D12CommandQueue* commandQueue, const wchar_t* shaderPath, const wchar_t* texturePath = nullptr, uint32_t sampleCount = 1);
+    void SetShadowMap(ID3D12Device* device, ID3D12Resource* shadowMap);
     void Shutdown();
 
     ID3D12PipelineState* GetPipelineState() const { return m_pipelineState.Get(); }

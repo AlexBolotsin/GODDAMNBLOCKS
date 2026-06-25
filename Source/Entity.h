@@ -10,6 +10,7 @@ struct FrameCameraData
 {
     mat4 viewMatrix;
     mat4 projMatrix;
+    mat4 lightViewProjMatrix;
 };
 
 class Entity

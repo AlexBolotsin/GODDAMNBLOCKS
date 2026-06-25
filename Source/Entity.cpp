@@ -27,10 +27,12 @@ void Entity::Draw(
     {
         mat4 viewMatrix;
         mat4 projMatrix;
+        mat4 lightViewProjMatrix;
     } perFrameData;
 
-    perFrameData.viewMatrix = frameData.viewMatrix;
-    perFrameData.projMatrix = frameData.projMatrix;
+    perFrameData.viewMatrix          = frameData.viewMatrix;
+    perFrameData.projMatrix          = frameData.projMatrix;
+    perFrameData.lightViewProjMatrix = frameData.lightViewProjMatrix;
 
     commandList->SetGraphicsRoot32BitConstants(0, sizeof(perFrameData) / 4, &perFrameData, 0);
 

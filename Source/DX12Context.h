@@ -28,6 +28,7 @@ public:
     ID3D12GraphicsCommandList* GetCommandList() const { return m_commandList.Get(); }
     ID3D12CommandQueue* GetCommandQueue() const { return m_commandQueue.Get(); }
     uint32_t GetMsaaSampleCount() const { return m_msaaSampleCount; }
+    ID3D12Resource* GetShadowMap() const { return m_shadowMap.Get(); }
 
 private:
     void LogAllAdapters();
@@ -40,11 +41,15 @@ private:
     bool CreateDSVHeap();
     bool CreateDepthStencilBuffer();
     bool CreateFenceAndEvent();
+    bool CreateShadowMapResources();
+    bool CreateShadowPipeline();
     void WaitForGpu();
     void MoveToNextFrame();
 
 private:
     static constexpr uint32_t FrameCount = 2;
+
+    static constexpr uint32_t kShadowMapSize = 2048;
 
     Microsoft::WRL::ComPtr<IDXGIFactory4> m_dxgiFactory;
     Microsoft::WRL::ComPtr<ID3D12Device> m_device;
@@ -59,6 +64,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_depthStencil;
     Microsoft::WRL::ComPtr<ID3D12Fence> m_fence;
     Microsoft::WRL::ComPtr<IDXGIAdapter1> m_adapter;
+
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_shadowMap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_shadowDsvHeap;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_shadowPso;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_shadowRootSig;
+    mat4 m_lightViewProj;
 
     HANDLE m_fenceEvent = nullptr;
     uint64_t m_fenceValues[FrameCount] = {};

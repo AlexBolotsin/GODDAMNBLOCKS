@@ -25,6 +25,7 @@ set(SOURCES
 
 set(HEADERS
     Source/GrmWindowWrapper.h
+    Source/InputState.h
     Source/DX12Context.h
     Source/EngineMath.h
     Source/Camera.h

@@ -152,7 +152,7 @@ bool Material::CreateRootSignature(ID3D12Device* device)
     D3D12_DESCRIPTOR_RANGE descriptorRanges[1] = {};
 
     D3D12_ROOT_CONSTANTS perFrameConstants = {};
-    perFrameConstants.Num32BitValues = 16 + 16; // view + projection
+    perFrameConstants.Num32BitValues = 16 + 16 + 16; // view + projection + lightViewProj
     perFrameConstants.ShaderRegister = 0;
     perFrameConstants.RegisterSpace = 0;
 
@@ -170,7 +170,7 @@ bool Material::CreateRootSignature(ID3D12Device* device)
     rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     descriptorRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    descriptorRanges[0].NumDescriptors = 1;
+    descriptorRanges[0].NumDescriptors = 2;
     descriptorRanges[0].BaseShaderRegister = 0;
     descriptorRanges[0].RegisterSpace = 0;
     descriptorRanges[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
@@ -180,26 +180,42 @@ bool Material::CreateRootSignature(ID3D12Device* device)
     rootParams[2].DescriptorTable.pDescriptorRanges = descriptorRanges;
     rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    D3D12_STATIC_SAMPLER_DESC staticSampler = {};
-    staticSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-    staticSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    staticSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    staticSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    staticSampler.MipLODBias = 0.0f;
-    staticSampler.MaxAnisotropy = 1;
-    staticSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-    staticSampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
-    staticSampler.MinLOD = 0.0f;
-    staticSampler.MaxLOD = D3D12_FLOAT32_MAX;
-    staticSampler.ShaderRegister = 0;
-    staticSampler.RegisterSpace = 0;
-    staticSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_STATIC_SAMPLER_DESC staticSamplers[2] = {};
+
+    staticSamplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    staticSamplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].MipLODBias = 0.0f;
+    staticSamplers[0].MaxAnisotropy = 1;
+    staticSamplers[0].ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    staticSamplers[0].BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+    staticSamplers[0].MinLOD = 0.0f;
+    staticSamplers[0].MaxLOD = D3D12_FLOAT32_MAX;
+    staticSamplers[0].ShaderRegister = 0;
+    staticSamplers[0].RegisterSpace = 0;
+    staticSamplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    // Shadow comparison sampler: clamp-to-border (opaque white = fully lit outside shadow map)
+    staticSamplers[1].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+    staticSamplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    staticSamplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    staticSamplers[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    staticSamplers[1].MipLODBias = 0.0f;
+    staticSamplers[1].MaxAnisotropy = 1;
+    staticSamplers[1].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    staticSamplers[1].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+    staticSamplers[1].MinLOD = 0.0f;
+    staticSamplers[1].MaxLOD = 0.0f;
+    staticSamplers[1].ShaderRegister = 1;
+    staticSamplers[1].RegisterSpace = 0;
+    staticSamplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
     rootSigDesc.NumParameters = 3;
     rootSigDesc.pParameters = rootParams;
-    rootSigDesc.NumStaticSamplers = 1;
-    rootSigDesc.pStaticSamplers = &staticSampler;
+    rootSigDesc.NumStaticSamplers = 2;
+    rootSigDesc.pStaticSamplers = staticSamplers;
     rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     Microsoft::WRL::ComPtr<ID3DBlob> serializedRootSig;
@@ -356,6 +372,23 @@ bool Material::CreatePipelineState(ID3D12Device* device, const wchar_t* shaderPa
     return true;
 }
 
+void Material::SetShadowMap(ID3D12Device* device, ID3D12Resource* shadowMap)
+{
+    if (!device || !shadowMap || !m_srvHeap)
+        return;
+
+    const UINT descriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_CPU_DESCRIPTOR_HANDLE slot1 = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
+    slot1.ptr += descriptorSize;
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format                  = DXGI_FORMAT_R32_FLOAT;
+    srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels     = 1;
+    device->CreateShaderResourceView(shadowMap, &srvDesc, slot1);
+}
+
 bool Material::CreateTextureResources(ID3D12Device* device, ID3D12CommandQueue* commandQueue, const wchar_t* texturePath)
 {
     if (!device || !commandQueue)
@@ -505,7 +538,7 @@ bool Material::CreateTextureResources(ID3D12Device* device, ID3D12CommandQueue* 
     CloseHandle(fenceEvent);
 
     D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
-    heapDesc.NumDescriptors = 1;
+    heapDesc.NumDescriptors = 2; // slot 0: sprite texture, slot 1: shadow map (written by SetShadowMap)
     heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_srvHeap))))

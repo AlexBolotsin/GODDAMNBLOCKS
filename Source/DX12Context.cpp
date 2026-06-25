@@ -178,6 +178,28 @@ bool DX12Context::Init(HWND hwnd, uint32_t width, uint32_t height)
         return false;
     }
 
+    if (!CreateShadowMapResources())
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreateShadowMapResources\n");
+        return false;
+    }
+
+    if (!CreateShadowPipeline())
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreateShadowPipeline\n");
+        return false;
+    }
+
+    // Build light view-proj from the shadow direction used for rendering
+    {
+        const vec3 lightDir    = Vec3Normalize(vec3(-0.40f, -0.95f, -0.55f));
+        const vec3 sceneCenter(0.0f, 0.0f, -5.0f);
+        const vec3 lightPos    = sceneCenter - (lightDir * 20.0f);
+        const mat4 lightView   = MatrixLookAtRH(lightPos, sceneCenter, vec3(0.0f, 1.0f, 0.0f));
+        const mat4 lightProj   = MatrixOrthographicRH(22.0f, 22.0f, 0.1f, 45.0f);
+        m_lightViewProj        = MatrixMultiply(lightView, lightProj);
+    }
+
     OutputDebugStringA("DX12Context::Init succeeded\n");
     return true;
 }
@@ -589,6 +611,145 @@ bool DX12Context::CreateFenceAndEvent()
     return true;
 }
 
+bool DX12Context::CreateShadowMapResources()
+{
+    // Depth texture (R32_TYPELESS so we can alias as D32_FLOAT DSV and R32_FLOAT SRV)
+    D3D12_HEAP_PROPERTIES heapProps = {};
+    heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension          = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width              = kShadowMapSize;
+    desc.Height             = kShadowMapSize;
+    desc.DepthOrArraySize   = 1;
+    desc.MipLevels          = 1;
+    desc.Format             = DXGI_FORMAT_R32_TYPELESS;
+    desc.SampleDesc.Count   = 1;
+    desc.Layout             = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    desc.Flags              = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+    D3D12_CLEAR_VALUE clearValue = {};
+    clearValue.Format            = DXGI_FORMAT_D32_FLOAT;
+    clearValue.DepthStencil.Depth = 1.0f;
+
+    if (FAILED(m_device->CreateCommittedResource(
+            &heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+            D3D12_RESOURCE_STATE_DEPTH_WRITE, &clearValue,
+            IID_PPV_ARGS(&m_shadowMap))))
+    {
+        return false;
+    }
+    m_shadowMap->SetName(L"Shadow Map");
+
+    // DSV heap
+    D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
+    dsvHeapDesc.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    dsvHeapDesc.NumDescriptors = 1;
+    dsvHeapDesc.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    if (FAILED(m_device->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&m_shadowDsvHeap))))
+        return false;
+
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+    dsvDesc.Format        = DXGI_FORMAT_D32_FLOAT;
+    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    m_device->CreateDepthStencilView(
+        m_shadowMap.Get(), &dsvDesc,
+        m_shadowDsvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    return true;
+}
+
+bool DX12Context::CreateShadowPipeline()
+{
+    // Minimal VS: transform position by world × lightViewProj
+    static const char* kShadowVS = R"(
+cbuffer ShadowCB : register(b0)
+{
+    row_major float4x4 worldMatrix;
+    row_major float4x4 lightViewProjMatrix;
+};
+float4 VSMain(float3 position : POSITION) : SV_POSITION
+{
+    float4 worldPos = mul(float4(position, 1.0f), worldMatrix);
+    return mul(worldPos, lightViewProjMatrix);
+}
+)";
+
+    Microsoft::WRL::ComPtr<ID3DBlob> vsBlob;
+    Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
+    UINT compileFlags = 0;
+#if defined(_DEBUG)
+    compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+    if (FAILED(D3DCompile(kShadowVS, strlen(kShadowVS), nullptr, nullptr, nullptr,
+                          "VSMain", "vs_5_0", compileFlags, 0, &vsBlob, &errorBlob)))
+    {
+        if (errorBlob) OutputDebugStringA(static_cast<const char*>(errorBlob->GetBufferPointer()));
+        return false;
+    }
+
+    // Root signature: 32 float constants (world 16 + lightVP 16)
+    D3D12_ROOT_PARAMETER rootParam = {};
+    rootParam.ParameterType            = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rootParam.Constants.Num32BitValues = 32;
+    rootParam.Constants.ShaderRegister = 0;
+    rootParam.ShaderVisibility         = D3D12_SHADER_VISIBILITY_VERTEX;
+
+    D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
+    rootSigDesc.NumParameters = 1;
+    rootSigDesc.pParameters   = &rootParam;
+    rootSigDesc.Flags         = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    Microsoft::WRL::ComPtr<ID3DBlob> serializedSig;
+    if (FAILED(D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+                                           &serializedSig, &errorBlob)))
+    {
+        if (errorBlob) OutputDebugStringA(static_cast<const char*>(errorBlob->GetBufferPointer()));
+        return false;
+    }
+    if (FAILED(m_device->CreateRootSignature(0, serializedSig->GetBufferPointer(),
+                                              serializedSig->GetBufferSize(),
+                                              IID_PPV_ARGS(&m_shadowRootSig))))
+        return false;
+
+    static const D3D12_INPUT_ELEMENT_DESC inputLayout[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
+          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    };
+
+    D3D12_RASTERIZER_DESC rastDesc = {};
+    rastDesc.FillMode              = D3D12_FILL_MODE_SOLID;
+    rastDesc.CullMode              = D3D12_CULL_MODE_BACK;
+    rastDesc.FrontCounterClockwise = TRUE;
+    rastDesc.DepthBias             = 100;
+    rastDesc.SlopeScaledDepthBias  = 2.0f;
+    rastDesc.DepthClipEnable       = TRUE;
+
+    D3D12_DEPTH_STENCIL_DESC dsDesc = {};
+    dsDesc.DepthEnable    = TRUE;
+    dsDesc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    dsDesc.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+    psoDesc.pRootSignature        = m_shadowRootSig.Get();
+    psoDesc.VS                    = { vsBlob->GetBufferPointer(), vsBlob->GetBufferSize() };
+    psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    psoDesc.SampleMask            = UINT_MAX;
+    psoDesc.RasterizerState       = rastDesc;
+    psoDesc.DepthStencilState     = dsDesc;
+    psoDesc.InputLayout           = { inputLayout, 1 };
+    psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    psoDesc.NumRenderTargets      = 0;
+    psoDesc.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+    psoDesc.SampleDesc.Count      = 1;
+
+    if (FAILED(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_shadowPso))))
+        return false;
+
+    return true;
+}
+
 void DX12Context::WaitForGpu()
 {
     if (!m_commandQueue || !m_fence)
@@ -697,58 +858,94 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
     if (!scene)
         return;
 
-    const float aspect = (m_height > 0) ? (static_cast<float>(m_width) / static_cast<float>(m_height)) : (16.0f / 9.0f);
-    FrameCameraData frameData;
-    frameData.viewMatrix = MatrixLookAtRH(camera.eye, camera.target, vec3(0.0f, 1.0f, 0.0f));
-    frameData.projMatrix = MatrixPerspectiveRH(camera.fovY, aspect, camera.nearZ, camera.farZ);
-
-    for (auto &entity : scene->GetEntities())
+    // ---- Shadow pass -------------------------------------------------------
+    // Shadow map enters RenderScene in DEPTH_WRITE (initial or restored at end of previous frame)
     {
-        if (!entity)
-            continue;
+        D3D12_CPU_DESCRIPTOR_HANDLE shadowDsv = m_shadowDsvHeap->GetCPUDescriptorHandleForHeapStart();
+        m_commandList->OMSetRenderTargets(0, nullptr, FALSE, &shadowDsv);
+        m_commandList->ClearDepthStencilView(shadowDsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-        if (entity->isBillboardActor)
+        D3D12_VIEWPORT shadowVp = { 0.0f, 0.0f,
+            static_cast<float>(kShadowMapSize), static_cast<float>(kShadowMapSize), 0.0f, 1.0f };
+        D3D12_RECT shadowScissor = { 0, 0,
+            static_cast<LONG>(kShadowMapSize), static_cast<LONG>(kShadowMapSize) };
+        m_commandList->RSSetViewports(1, &shadowVp);
+        m_commandList->RSSetScissorRects(1, &shadowScissor);
+
+        m_commandList->SetPipelineState(m_shadowPso.Get());
+        m_commandList->SetGraphicsRootSignature(m_shadowRootSig.Get());
+
+        struct ShadowCB { mat4 world; mat4 lightVP; };
+        ShadowCB cb;
+        cb.lightVP = m_lightViewProj;
+
+        for (auto &entity : scene->GetEntities())
         {
-            const mat4 billboardWorld = MatrixBillboard(entity->transform.position, entity->transform.scale, camera.eye);
-            entity->Draw(m_commandList.Get(), frameData, &billboardWorld, nullptr, false);
-            continue;
+            if (!entity || !entity->enabled || entity->isBillboardActor || !entity->castsProjectedShadow || !entity->mesh)
+                continue;
+
+            cb.world = entity->transform.GetWorldMatrix();
+            m_commandList->SetGraphicsRoot32BitConstants(0, sizeof(cb) / 4, &cb, 0);
+            entity->mesh->Draw(m_commandList.Get());
         }
 
-        entity->Draw(m_commandList.Get(), frameData);
+        D3D12_RESOURCE_BARRIER toSrv = {};
+        toSrv.Type                       = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toSrv.Transition.pResource       = m_shadowMap.Get();
+        toSrv.Transition.StateBefore     = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        toSrv.Transition.StateAfter      = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        toSrv.Transition.Subresource     = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        m_commandList->ResourceBarrier(1, &toSrv);
     }
 
-    const float groundPlaneY = -0.985f;
-    const vec3 shadowRayDir = Vec3Normalize(vec3(-0.40f, -0.95f, -0.55f));
-    const mat4 shadowProj = MatrixShadowProjection(groundPlaneY, shadowRayDir);
-
-    const vec4 shadowTints[] =
-        {
-            vec4(0.0f, 0.0f, 0.0f, 0.16f),
-            vec4(0.0f, 0.0f, 0.0f, 0.08f),
-            vec4(0.0f, 0.0f, 0.0f, 0.08f),
-        };
-    const vec3 shadowOffsets[] =
-        {
-            vec3(0.0f, 0.0015f, 0.0f),
-            vec3(0.06f, 0.0030f, 0.03f),
-            vec3(-0.05f, 0.0045f, -0.02f),
-        };
-
-    for (size_t i = 1; i < scene->GetEntities().size(); ++i)
+    // ---- Main pass ---------------------------------------------------------
     {
-        Entity *entity = scene->GetEntities()[i].get();
-        if (!entity || entity->isBillboardActor || !entity->castsProjectedShadow)
-            continue;
+        D3D12_CPU_DESCRIPTOR_HANDLE msaaRtv = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        msaaRtv.ptr += FrameCount * m_rtvDescriptorSize;
+        D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
+        m_commandList->OMSetRenderTargets(1, &msaaRtv, FALSE, &dsv);
 
-        const mat4 objectWorld = entity->transform.GetWorldMatrix();
-        const mat4 projectedWorld = MatrixMultiply(objectWorld, shadowProj);
+        D3D12_VIEWPORT vp = { 0.0f, 0.0f,
+            static_cast<float>(m_width), static_cast<float>(m_height), 0.0f, 1.0f };
+        D3D12_RECT scissor = { 0, 0, static_cast<LONG>(m_width), static_cast<LONG>(m_height) };
+        m_commandList->RSSetViewports(1, &vp);
+        m_commandList->RSSetScissorRects(1, &scissor);
 
-        for (int s = 0; s < 3; ++s)
+        const float aspect = (m_height > 0)
+            ? (static_cast<float>(m_width) / static_cast<float>(m_height))
+            : (16.0f / 9.0f);
+
+        FrameCameraData frameData;
+        frameData.viewMatrix          = MatrixLookAtRH(camera.eye, camera.target, vec3(0.0f, 1.0f, 0.0f));
+        frameData.projMatrix          = MatrixPerspectiveRH(camera.fovY, aspect, camera.nearZ, camera.farZ);
+        frameData.lightViewProjMatrix = m_lightViewProj;
+
+        for (auto &entity : scene->GetEntities())
         {
-            const mat4 offset = MatrixTranslation(shadowOffsets[s].x, shadowOffsets[s].y, shadowOffsets[s].z);
-            const mat4 shadowWorld = MatrixMultiply(projectedWorld, offset);
-            entity->Draw(m_commandList.Get(), frameData, &shadowWorld, &shadowTints[s], true);
+            if (!entity)
+                continue;
+
+            if (entity->isBillboardActor)
+            {
+                const mat4 billboardWorld = MatrixBillboard(
+                    entity->transform.position, entity->transform.scale, camera.eye);
+                entity->Draw(m_commandList.Get(), frameData, &billboardWorld, nullptr, false);
+                continue;
+            }
+
+            entity->Draw(m_commandList.Get(), frameData);
         }
+    }
+
+    // Restore shadow map to DEPTH_WRITE so next frame's shadow pass can clear it without a barrier
+    {
+        D3D12_RESOURCE_BARRIER toDepth = {};
+        toDepth.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toDepth.Transition.pResource   = m_shadowMap.Get();
+        toDepth.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        toDepth.Transition.StateAfter  = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        toDepth.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        m_commandList->ResourceBarrier(1, &toDepth);
     }
 }
 

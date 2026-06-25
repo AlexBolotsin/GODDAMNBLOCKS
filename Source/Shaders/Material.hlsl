@@ -2,6 +2,7 @@ cbuffer PerObject : register(b0)
 {
     row_major float4x4 viewMatrix;
     row_major float4x4 projMatrix;
+    row_major float4x4 lightViewProjMatrix;
 };
 
 cbuffer PerDraw : register(b1)
@@ -12,8 +13,10 @@ cbuffer PerDraw : register(b1)
     float4 spriteUVRect;
 };
 
-Texture2D spriteTexture : register(t0);
-SamplerState spriteSampler : register(s0);
+Texture2D            spriteTexture : register(t0);
+Texture2D<float>     shadowMap     : register(t1);
+SamplerState               spriteSampler : register(s0);
+SamplerComparisonState     shadowSampler : register(s1);
 
 struct VSInput
 {
@@ -44,6 +47,22 @@ float SampleSpriteAlpha(in float2 uv, out float3 color)
     return alpha;
 }
 
+float SampleShadow(float3 worldPos)
+{
+    float4 ls = mul(float4(worldPos, 1.0f), lightViewProjMatrix);
+    float2 uv = float2(ls.x * 0.5f + 0.5f, ls.y * -0.5f + 0.5f);
+    if (any(uv < 0.0f) || any(uv > 1.0f))
+        return 1.0f;
+
+    float depth = ls.z - 0.005f;
+    float shadow = 0.0f;
+    float2 texelSize = 1.0f / 2048.0f;
+    [unroll] for (int dx = -1; dx <= 1; ++dx)
+        [unroll] for (int dy = -1; dy <= 1; ++dy)
+            shadow += shadowMap.SampleCmpLevelZero(shadowSampler, uv + float2(dx, dy) * texelSize, depth);
+    return shadow / 9.0f;
+}
+
 PSInput VSMain(VSInput input)
 {
     PSInput output;
@@ -63,25 +82,6 @@ PSInput VSMain(VSInput input)
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    if (renderParams.x > 0.5f)
-    {
-        if (renderParams.y > 0.5f)
-        {
-            float2 spriteUv = lerp(spriteUVRect.xy, spriteUVRect.zw, input.uv);
-            float3 spriteColor;
-            float spriteAlpha = SampleSpriteAlpha(spriteUv, spriteColor);
-            clip(spriteAlpha - 0.05f);
-        }
-
-        float cameraDistance = length(input.viewPos);
-        float fogStart = 8.0f;
-        float fogEnd = 22.0f;
-        float fogFactor = saturate((cameraDistance - fogStart) / (fogEnd - fogStart));
-
-        float alpha = input.color.a * (1.0f - fogFactor * 0.5f);
-        return float4(0.0f, 0.0f, 0.0f, alpha);
-    }
-
     if (renderParams.y > 0.5f)
     {
         float2 spriteUv = lerp(spriteUVRect.xy, spriteUVRect.zw, input.uv);
@@ -148,7 +148,8 @@ float4 PSMain(PSInput input) : SV_TARGET
     float ndotv = saturate(dot(normalWS, viewDir));
     float edgeBand = smoothstep(0.62f, 0.90f, 1.0f - ndotv);
 
-    float3 diffuseLighting = keyColor * (0.10f + keyBand * 0.75f) + fillColor * (fillBand * 0.30f);
+    float shadowFactor = SampleShadow(input.worldPos);
+    float3 diffuseLighting = keyColor * (0.10f + keyBand * 0.75f * shadowFactor) + fillColor * (fillBand * 0.30f);
     float3 litColor = baseColor * (ambientColor + diffuseLighting);
     litColor *= (1.0f - edgeBand * 0.14f);
     litColor = min(litColor, float3(1.0f, 1.0f, 1.0f));

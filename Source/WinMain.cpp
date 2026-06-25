@@ -3,24 +3,15 @@
 #include "Scene.h"
 #include "Mesh.h"
 #include "Material.h"
-#include <stdio.h>
 #include <memory>
 #include <chrono>
 #include <cmath>
 #include <vector>
 #include <filesystem>
 #include <string>
-#include <fstream>
-#include <wincodec.h>
 
 namespace
 {
-    void DebugStageLog(const char* message)
-    {
-        std::ofstream logFile("runtime_trace.log", std::ios::app);
-        logFile << message << "\n";
-    }
-
     std::wstring GetSpriteSheetPath()
     {
         wchar_t modulePath[MAX_PATH] = {};
@@ -42,170 +33,6 @@ namespace
     constexpr float SpriteSheetWidth = 293.0f;
     constexpr float SpriteSheetHeight = 382.0f;
 
-    struct LoadedSpriteSheet
-    {
-        uint32_t width = 0;
-        uint32_t height = 0;
-        std::vector<uint8_t> pixels;
-    };
-
-    bool LoadSpriteSheetPixels(const wchar_t* texturePath, LoadedSpriteSheet& outSheet)
-    {
-        const HRESULT initHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        const bool shouldUninitialize = SUCCEEDED(initHr);
-        if (FAILED(initHr) && initHr != RPC_E_CHANGED_MODE)
-            return false;
-
-        Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
-        Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
-        Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
-        Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
-
-        HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
-        if (FAILED(hr))
-        {
-            if (shouldUninitialize)
-                CoUninitialize();
-            return false;
-        }
-
-        hr = factory->CreateDecoderFromFilename(texturePath, nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder);
-        if (FAILED(hr))
-        {
-            if (shouldUninitialize)
-                CoUninitialize();
-            return false;
-        }
-
-        hr = decoder->GetFrame(0, &frame);
-        if (FAILED(hr))
-        {
-            if (shouldUninitialize)
-                CoUninitialize();
-            return false;
-        }
-
-        hr = factory->CreateFormatConverter(&converter);
-        if (FAILED(hr))
-        {
-            if (shouldUninitialize)
-                CoUninitialize();
-            return false;
-        }
-
-        hr = converter->Initialize(
-            frame.Get(),
-            GUID_WICPixelFormat32bppRGBA,
-            WICBitmapDitherTypeNone,
-            nullptr,
-            0.0,
-            WICBitmapPaletteTypeCustom);
-        if (FAILED(hr))
-        {
-            if (shouldUninitialize)
-                CoUninitialize();
-            return false;
-        }
-
-        UINT width = 0;
-        UINT height = 0;
-        hr = converter->GetSize(&width, &height);
-        if (FAILED(hr) || width == 0 || height == 0)
-        {
-            if (shouldUninitialize)
-                CoUninitialize();
-            return false;
-        }
-
-        outSheet.width = width;
-        outSheet.height = height;
-        outSheet.pixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4ull);
-        hr = converter->CopyPixels(nullptr, width * 4, static_cast<UINT>(outSheet.pixels.size()), outSheet.pixels.data());
-
-        if (shouldUninitialize)
-            CoUninitialize();
-
-        return SUCCEEDED(hr);
-    }
-
-    bool TryGetSpritePixel(const LoadedSpriteSheet& sheet, int x, int y, vec4& outColor)
-    {
-        if (x < 0 || y < 0 || x >= static_cast<int>(sheet.width) || y >= static_cast<int>(sheet.height))
-            return false;
-
-        const size_t index = (static_cast<size_t>(y) * static_cast<size_t>(sheet.width) + static_cast<size_t>(x)) * 4ull;
-        const float r = sheet.pixels[index + 0] / 255.0f;
-        const float g = sheet.pixels[index + 1] / 255.0f;
-        const float b = sheet.pixels[index + 2] / 255.0f;
-        const float a = sheet.pixels[index + 3] / 255.0f;
-
-        const float dr = r - (34.0f / 255.0f);
-        const float dg = g - (177.0f / 255.0f);
-        const float db = b - (76.0f / 255.0f);
-        const float chromaDistanceSq = dr * dr + dg * dg + db * db;
-
-        if (a < 0.05f || chromaDistanceSq < 0.010f)
-            return false;
-
-        outColor = vec4(r, g, b, 1.0f);
-        return true;
-    }
-
-    std::shared_ptr<Mesh> CreateSpriteFrameMesh(
-        ID3D12Device* device,
-        const LoadedSpriteSheet& sheet,
-        int frameX,
-        int frameY,
-        int frameWidth,
-        int frameHeight)
-    {
-        std::vector<Vertex> vertices;
-        std::vector<uint32_t> indices;
-        vertices.reserve(static_cast<size_t>(frameWidth * frameHeight) * 4ull);
-        indices.reserve(static_cast<size_t>(frameWidth * frameHeight) * 6ull);
-
-        const float pixelSize = 1.0f / static_cast<float>(frameHeight);
-        const float spriteWidthNormalized = static_cast<float>(frameWidth) * pixelSize;
-        const float xOffset = -spriteWidthNormalized * 0.5f;
-        const float yOffset = -0.5f;
-
-        for (int y = 0; y < frameHeight; ++y)
-        {
-            for (int x = 0; x < frameWidth; ++x)
-            {
-                vec4 pixelColor;
-                if (!TryGetSpritePixel(sheet, frameX + x, frameY + y, pixelColor))
-                    continue;
-
-                const float left = xOffset + static_cast<float>(x) * pixelSize;
-                const float right = left + pixelSize;
-                const float top = yOffset + 1.0f - static_cast<float>(y) * pixelSize;
-                const float bottom = top - pixelSize;
-
-                const uint32_t baseIndex = static_cast<uint32_t>(vertices.size());
-                vertices.push_back({ vec3(left,  bottom, 0.0f), vec3(0.0f, 0.0f, 1.0f), pixelColor, vec2(0.0f, 1.0f) });
-                vertices.push_back({ vec3(right, bottom, 0.0f), vec3(0.0f, 0.0f, 1.0f), pixelColor, vec2(1.0f, 1.0f) });
-                vertices.push_back({ vec3(right, top,    0.0f), vec3(0.0f, 0.0f, 1.0f), pixelColor, vec2(1.0f, 0.0f) });
-                vertices.push_back({ vec3(left,  top,    0.0f), vec3(0.0f, 0.0f, 1.0f), pixelColor, vec2(0.0f, 0.0f) });
-
-                indices.push_back(baseIndex + 0);
-                indices.push_back(baseIndex + 1);
-                indices.push_back(baseIndex + 2);
-                indices.push_back(baseIndex + 0);
-                indices.push_back(baseIndex + 2);
-                indices.push_back(baseIndex + 3);
-            }
-        }
-
-        if (vertices.empty() || indices.empty())
-            return nullptr;
-
-        auto mesh = std::make_shared<Mesh>();
-        if (!mesh->Init(device, vertices, indices))
-            return nullptr;
-
-        return mesh;
-    }
 }
 
 // Helper: Create a simple cube mesh
@@ -316,8 +143,6 @@ std::shared_ptr<Mesh> CreateSpriteQuadMesh(ID3D12Device* device)
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
 {
-    DebugStageLog("WinMain start");
-
     const HRESULT comInitHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool shouldUninitializeCom = SUCCEEDED(comInitHr);
     if (FAILED(comInitHr) && comInitHr != RPC_E_CHANGED_MODE)
@@ -336,13 +161,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
 
     GRMWindowWrapper window;
 
-    window.OnResize = [](uint32_t width, uint32_t height)
-    {
-        wchar_t buf[64];
-        swprintf_s(buf, L"Window resized: %u x %u\n", width, height);
-        OutputDebugStringW(buf);
-    };
-
     window.OnDestroy = []()
     {
         OutputDebugStringW(L"Window destroyed\n");
@@ -359,6 +177,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         OutputDebugStringW(L"Failed to initialize DirectX 12.\n");
         return -1;
     }
+
+    window.OnResize = [&dx12](uint32_t width, uint32_t height)
+    {
+        dx12.Resize(width, height);
+    };
 
     // Create scene and populate with test objects
     Scene scene;
@@ -463,7 +286,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     const auto startTime = std::chrono::steady_clock::now();
     while (running)
     {
-        DebugStageLog("Frame begin loop");
         if (!window.PumpMessages())
         {
             running = false;

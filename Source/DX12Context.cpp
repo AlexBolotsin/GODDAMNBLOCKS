@@ -1029,7 +1029,7 @@ bool DX12Context::CreatePostProcessPipelines()
 Texture2D    hdrInput    : register(t0);
 Texture2D    bloomInput  : register(t1);
 SamplerState linearSmp   : register(s0);
-cbuffer PostCB : register(b0) { float2 texelSize; float2 _pad; float fps; float3 _pad2; };
+cbuffer PostCB : register(b0) { float2 texelSize; float2 _pad; float fps; float scanlinesEnabled; float ditherEnabled; float _pad2; };
 
 struct PSInput { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 
@@ -1099,6 +1099,31 @@ float4 PS_Tonemap(PSInput i) : SV_TARGET
     float3 hdr   = hdrInput.Sample(linearSmp,  i.uv).rgb;
     float3 bloom = bloomInput.Sample(linearSmp, i.uv).rgb;
     float3 color = ACESFilm(hdr + bloom * 0.07f);
+
+    // Scanlines + phosphor pixel grid (C key)
+    if (scanlinesEnabled > 0.5f)
+    {
+        // Every other row darkened to 55%
+        float scanline = (fmod(i.pos.y, 2.0f) < 1.0f) ? 1.0f : 0.55f;
+        // Subtle brightness dip between pixel columns — creates a pixel-grid look
+        float phosphor = 0.80f + 0.20f * sin(i.pos.x * 3.14159265f);
+        color *= scanline * phosphor;
+    }
+
+    // Bayer 4x4 ordered dithering — quantises to 8 levels per channel (V key)
+    if (ditherEnabled > 0.5f)
+    {
+        static const int kBayer[16] = {
+             0,  8,  2, 10,
+            12,  4, 14,  6,
+             3, 11,  1,  9,
+            15,  7, 13,  5
+        };
+        int crtPx = int(i.pos.x);
+        int crtPy = int(i.pos.y);
+        float bayerT = float(kBayer[(crtPy % 4) * 4 + (crtPx % 4)]) / 16.0f;
+        color = saturate(floor(color * 8.0f + bayerT) / 8.0f);
+    }
 
     // FPS counter overlay — 3x5 bitmap font at 4x scale, top-left corner
     const int SCALE  = 4;
@@ -1602,7 +1627,11 @@ void DX12Context::EndFrame()
         m_commandList->SetPipelineState(m_tonemapPso.Get());
         m_commandList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         m_commandList->SetGraphicsRootDescriptorTable(1, hdrSrv); // t0=HDR, t1=bloomA (contiguous)
-        m_commandList->SetGraphicsRoot32BitConstants(0, 1, &m_fps, 4); // fps at cbuffer slot 4
+        m_commandList->SetGraphicsRoot32BitConstants(0, 1, &m_fps, 4);
+        float scanlinesVal = m_scanlinesEnabled ? 1.0f : 0.0f;
+        float ditherVal    = m_ditherEnabled    ? 1.0f : 0.0f;
+        m_commandList->SetGraphicsRoot32BitConstants(0, 1, &scanlinesVal, 5);
+        m_commandList->SetGraphicsRoot32BitConstants(0, 1, &ditherVal,    6);
         DrawFS(fw, fh);
     }
     {

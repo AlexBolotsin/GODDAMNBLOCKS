@@ -68,6 +68,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     float fpsAccum   = 0.0f;
     int   fpsCount   = 0;
     float fpsCurrent = 0.0f;
+    bool  scanlinesEnabled    = false;
+    bool  scanlinesKeyWasDown = false;
+    bool  ditherEnabled       = false;
+    bool  ditherKeyWasDown    = false;
     while (true)
     {
         if (!window.PumpMessages())
@@ -92,6 +96,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
             fpsCount   = 0;
         }
         dx12.SetFPS(fpsCurrent);
+
+        // C — toggle scanlines + phosphor grid
+        const bool scanlinesKeyDown = (GetAsyncKeyState('C') & 0x8000) != 0;
+        if (scanlinesKeyDown && !scanlinesKeyWasDown)
+            scanlinesEnabled = !scanlinesEnabled;
+        scanlinesKeyWasDown = scanlinesKeyDown;
+        dx12.SetScanlinesEnabled(scanlinesEnabled);
+
+        // V — toggle Bayer dithering
+        const bool ditherKeyDown = (GetAsyncKeyState('V') & 0x8000) != 0;
+        if (ditherKeyDown && !ditherKeyWasDown)
+            ditherEnabled = !ditherEnabled;
+        ditherKeyWasDown = ditherKeyDown;
+        dx12.SetDitherEnabled(ditherEnabled);
 
         game.Update(dt, window.ConsumeInput());
 

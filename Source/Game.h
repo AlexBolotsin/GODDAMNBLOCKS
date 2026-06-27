@@ -56,6 +56,11 @@ private:
     float m_camElevation = 0.245f;
     float m_camRadius    = 8.25f;
 
+    std::shared_ptr<Mesh>     m_targetRingMesh;
+    Entity*                   m_targetRing = nullptr;
+    vec3                      m_targetPos  = { 0.0f, -1.0f, -5.0f };
+    bool                      m_hasTarget  = false;
+
     std::shared_ptr<Mesh>     m_cubeMesh;
     std::shared_ptr<Mesh>     m_groundMesh;
     std::shared_ptr<Mesh>     m_spriteMesh;

@@ -39,7 +39,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     desc.width = 1280;
     desc.height = 720;
     desc.isFullScreen = false;
-    desc.showCursor = false;
+    desc.showCursor = true;
 
     GRMWindowWrapper window;
     window.OnDestroy = [] { OutputDebugStringW(L"Window destroyed\n"); };
@@ -73,7 +73,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     bool  ditherEnabled       = false;
     bool  ditherKeyWasDown    = false;
     bool  spaceKeyWasDown     = false;
-    bool  meteorKeyWasDown    = false;
+    bool  rightMouseWasDown   = false;
+    bool  leftMouseWasDown    = false;
     while (true)
     {
         if (!window.PumpMessages())
@@ -117,9 +118,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         const bool spaceDown   = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
         input.cinematicToggled = spaceDown && !spaceKeyWasDown;
         spaceKeyWasDown        = spaceDown;
-        const bool meteorDown  = (GetAsyncKeyState('M') & 0x8000) != 0;
-        input.summonMeteors    = meteorDown && !meteorKeyWasDown;
-        meteorKeyWasDown       = meteorDown;
+
+        const bool rightDown  = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+        const bool leftDown   = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        input.rightMouseHeld  = rightDown;
+        input.leftMouseClick  = leftDown && !leftMouseWasDown;
+        rightMouseWasDown     = rightDown;
+        leftMouseWasDown      = leftDown;
+
+        POINT cursorPt;
+        GetCursorPos(&cursorPt);
+        ScreenToClient(window.GetHWND(), &cursorPt);
+        input.mouseAbsX = cursorPt.x;
+        input.mouseAbsY = cursorPt.y;
+        input.screenW   = window.GetWidth();
+        input.screenH   = window.GetHeight();
+
         game.Update(dt, input);
 
         dx12.BeginFrame();

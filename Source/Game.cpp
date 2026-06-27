@@ -98,6 +98,39 @@ namespace
         return mesh->Init(device, vertices, indices) ? mesh : nullptr;
     }
 
+    std::shared_ptr<Mesh> CreateTargetRingMesh(ID3D12Device* device)
+    {
+        constexpr int   kSegments  = 48;
+        constexpr float kInnerR    = 0.82f;
+        constexpr float kOuterR    = 1.00f;
+        constexpr float kPi        = 3.14159265f;
+
+        std::vector<Vertex>   vertices;
+        std::vector<uint32_t> indices;
+        vertices.reserve(kSegments * 4);
+        indices.reserve(kSegments * 6);
+
+        for (int i = 0; i < kSegments; ++i)
+        {
+            const float a0 = 2.0f * kPi * static_cast<float>(i)     / kSegments;
+            const float a1 = 2.0f * kPi * static_cast<float>(i + 1) / kSegments;
+            const float c0 = cosf(a0), s0 = sinf(a0);
+            const float c1 = cosf(a1), s1 = sinf(a1);
+
+            const uint32_t base = static_cast<uint32_t>(vertices.size());
+            vertices.push_back({ vec3(c0 * kInnerR, 0.0f, s0 * kInnerR), vec3(0,1,0), vec4(1,1,1,1), vec2(0,0) });
+            vertices.push_back({ vec3(c0 * kOuterR, 0.0f, s0 * kOuterR), vec3(0,1,0), vec4(1,1,1,1), vec2(1,0) });
+            vertices.push_back({ vec3(c1 * kInnerR, 0.0f, s1 * kInnerR), vec3(0,1,0), vec4(1,1,1,1), vec2(0,1) });
+            vertices.push_back({ vec3(c1 * kOuterR, 0.0f, s1 * kOuterR), vec3(0,1,0), vec4(1,1,1,1), vec2(1,1) });
+
+            indices.push_back(base + 0); indices.push_back(base + 2); indices.push_back(base + 1);
+            indices.push_back(base + 1); indices.push_back(base + 2); indices.push_back(base + 3);
+        }
+
+        auto mesh = std::make_shared<Mesh>();
+        return mesh->Init(device, vertices, indices) ? mesh : nullptr;
+    }
+
     std::shared_ptr<Mesh> CreateSphereMesh(ID3D12Device* device)
     {
         constexpr int   stacks = 12;
@@ -163,13 +196,14 @@ namespace
 
 bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spriteSheetPath)
 {
-    m_cubeMesh   = CreateCubeMesh(dx12.GetDevice());
-    m_groundMesh = CreateGroundPlaneMesh(dx12.GetDevice());
-    m_spriteMesh = CreateSpriteQuadMesh(dx12.GetDevice());
-    m_blobMesh   = CreateBlobShadowMesh(dx12.GetDevice());
-    m_sphereMesh = CreateSphereMesh(dx12.GetDevice());
+    m_cubeMesh       = CreateCubeMesh(dx12.GetDevice());
+    m_groundMesh     = CreateGroundPlaneMesh(dx12.GetDevice());
+    m_spriteMesh     = CreateSpriteQuadMesh(dx12.GetDevice());
+    m_blobMesh       = CreateBlobShadowMesh(dx12.GetDevice());
+    m_sphereMesh     = CreateSphereMesh(dx12.GetDevice());
+    m_targetRingMesh = CreateTargetRingMesh(dx12.GetDevice());
 
-    if (!m_cubeMesh || !m_groundMesh || !m_spriteMesh || !m_blobMesh || !m_sphereMesh)
+    if (!m_cubeMesh || !m_groundMesh || !m_spriteMesh || !m_blobMesh || !m_sphereMesh || !m_targetRingMesh)
     {
         OutputDebugStringW(L"Game::Init failed to create meshes\n");
         return false;
@@ -197,6 +231,16 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
         ground.transform.SetPosition(0.0f, -1.0f, -5.0f);
         ground.transform.SetScale(100.0f, 1.0f, 100.0f);
         ground.tint = vec4(0.95f, 0.95f, 0.95f, 1.0f);
+    }
+
+    // Targeting ring gizmo — position/visibility updated every frame in Update
+    {
+        Entity& ring = m_scene.CreateEntity();
+        ring.mesh                 = m_targetRingMesh;
+        ring.material             = m_material;
+        ring.castsProjectedShadow = false;
+        ring.enabled              = false;
+        m_targetRing              = &ring;
     }
 
     // Cubes
@@ -366,9 +410,12 @@ void Game::Update(float dt, const InputState& input)
     }
     else
     {
-        m_camAzimuth   += static_cast<float>(input.mouseDeltaX) * kOrbitSensitivity;
-        m_camElevation -= static_cast<float>(input.mouseDeltaY) * kOrbitSensitivity;
-        m_camElevation  = std::max(kMinElevation, std::min(kMaxElevation, m_camElevation));
+        if (input.rightMouseHeld)
+        {
+            m_camAzimuth   += static_cast<float>(input.mouseDeltaX) * kOrbitSensitivity;
+            m_camElevation -= static_cast<float>(input.mouseDeltaY) * kOrbitSensitivity;
+            m_camElevation  = std::max(kMinElevation, std::min(kMaxElevation, m_camElevation));
+        }
         m_camRadius    -= static_cast<float>(input.scrollDelta) * kZoomSensitivity;
         m_camRadius     = std::max(kMinRadius, std::min(kMaxRadius, m_camRadius));
         m_camera.target = vec3(0.0f, 0.0f, -5.0f);
@@ -380,6 +427,57 @@ void Game::Update(float dt, const InputState& input)
         m_camera.target.x + cosf(m_camAzimuth) * cosEl * m_camRadius,
         m_camera.target.y + sinEl * m_camRadius,
         m_camera.target.z + sinf(m_camAzimuth) * cosEl * m_camRadius);
+
+    // Unproject mouse cursor to ground plane (Y = -1.0) for targeting gizmo
+    if (input.screenW > 0 && input.screenH > 0)
+    {
+        const float aspect  = static_cast<float>(input.screenW) / static_cast<float>(input.screenH);
+        const mat4  viewMat = MatrixLookAtRH(m_camera.eye, m_camera.target, vec3(0, 1, 0));
+        const mat4  projMat = MatrixPerspectiveRH(m_camera.fovY, aspect, m_camera.nearZ, m_camera.farZ);
+
+        const float ndcX = (static_cast<float>(input.mouseAbsX) / static_cast<float>(input.screenW)) * 2.0f - 1.0f;
+        const float ndcY = 1.0f - (static_cast<float>(input.mouseAbsY) / static_cast<float>(input.screenH)) * 2.0f;
+
+        // Camera basis extracted from view matrix column vectors (stored across rows in m[])
+        const vec3 camRight = { viewMat.m[0], viewMat.m[4], viewMat.m[8]  };
+        const vec3 camUp    = { viewMat.m[1], viewMat.m[5], viewMat.m[9]  };
+        const vec3 camBack  = { viewMat.m[2], viewMat.m[6], viewMat.m[10] };
+
+        const float vx = ndcX / projMat.m[0]; // projMat.m[0] = f/aspect
+        const float vy = ndcY / projMat.m[5]; // projMat.m[5] = f
+        const vec3 rayDir = Vec3Normalize(vec3(
+            camRight.x * vx + camUp.x * vy - camBack.x,
+            camRight.y * vx + camUp.y * vy - camBack.y,
+            camRight.z * vx + camUp.z * vy - camBack.z));
+
+        constexpr float kGroundY = -1.0f;
+        if (rayDir.y < -1e-4f)
+        {
+            const float tHit = (kGroundY - m_camera.eye.y) / rayDir.y;
+            m_targetPos = vec3(
+                m_camera.eye.x + rayDir.x * tHit,
+                kGroundY,
+                m_camera.eye.z + rayDir.z * tHit);
+            m_hasTarget = true;
+        }
+        else
+        {
+            m_hasTarget = false;
+        }
+    }
+
+    // Update targeting ring gizmo
+    if (m_targetRing)
+    {
+        m_targetRing->enabled = m_hasTarget;
+        if (m_hasTarget)
+        {
+            const float pulse = 0.65f + 0.35f * sinf(t * 5.0f);
+            m_targetRing->transform.SetPosition(m_targetPos.x, -0.97f, m_targetPos.z);
+            m_targetRing->transform.SetScale(2.8f, 1.0f, 2.8f);
+            m_targetRing->tint = vec4(1.0f, pulse, 0.05f, 1.0f); // orange-yellow pulse
+        }
+    }
 
     // Cube animation
     for (size_t i = 0; i < m_cubeActors.size(); ++i)
@@ -464,8 +562,8 @@ void Game::Update(float dt, const InputState& input)
         sprite->spriteUVRect = sprite->animFrames[frameIndex];
     }
 
-    // Summon meteors — M key spawns a volley of red spheres from the sky
-    if (input.summonMeteors && m_sphereMesh)
+    // Left-click casts a volley of meteors aimed at the targeting ring position
+    if (input.leftMouseClick && m_hasTarget && m_sphereMesh)
     {
         auto MRng = [this]() -> float {
             m_meteorRng = m_meteorRng * 1664525u + 1013904223u;
@@ -475,15 +573,15 @@ void Game::Update(float dt, const InputState& input)
         const int count = 3 + static_cast<int>(MRng() * 3.0f); // 3–5
         for (int i = 0; i < count; ++i)
         {
-            const float x    = (MRng() - 0.5f) * 18.0f;
-            const float z    = (MRng() - 0.5f) * 12.0f - 5.0f;
+            const float dx   = (MRng() - 0.5f) * 5.0f; // scatter ±2.5 around click point
+            const float dz   = (MRng() - 0.5f) * 5.0f;
             const float size = 0.55f + MRng() * 0.55f;
 
             Entity& meteor = m_scene.CreateEntity();
             meteor.mesh                 = m_sphereMesh;
             meteor.material             = m_material;
             meteor.castsProjectedShadow = true;
-            meteor.transform.SetPosition(x, 22.0f, z);
+            meteor.transform.SetPosition(m_targetPos.x + dx, 22.0f, m_targetPos.z + dz);
             meteor.transform.SetScale(size, size, size);
             meteor.tint     = vec4(1.0f, 0.12f + MRng() * 0.18f, 0.02f, 1.0f);
             meteor.velocity = vec3((MRng() - 0.5f) * 2.5f, -8.0f, (MRng() - 0.5f) * 2.5f);

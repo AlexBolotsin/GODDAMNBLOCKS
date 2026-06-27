@@ -73,6 +73,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
     bool  ditherEnabled       = false;
     bool  ditherKeyWasDown    = false;
     bool  spaceKeyWasDown     = false;
+    bool  meteorKeyWasDown    = false;
     while (true)
     {
         if (!window.PumpMessages())
@@ -116,6 +117,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         const bool spaceDown   = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
         input.cinematicToggled = spaceDown && !spaceKeyWasDown;
         spaceKeyWasDown        = spaceDown;
+        const bool meteorDown  = (GetAsyncKeyState('M') & 0x8000) != 0;
+        input.summonMeteors    = meteorDown && !meteorKeyWasDown;
+        meteorKeyWasDown       = meteorDown;
         game.Update(dt, input);
 
         dx12.BeginFrame();

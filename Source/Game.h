@@ -12,6 +12,15 @@ class Entity;
 
 class Game
 {
+    struct ExplosionData
+    {
+        Entity* sphere;
+        vec3    center;
+        float   age;
+        float   maxAge;
+        float   maxRadius;
+    };
+
 public:
     bool Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spriteSheetPath);
     void Update(float dt, const InputState& input);
@@ -34,9 +43,13 @@ private:
     std::shared_ptr<Mesh>     m_groundMesh;
     std::shared_ptr<Mesh>     m_spriteMesh;
     std::shared_ptr<Mesh>     m_blobMesh;
+    std::shared_ptr<Mesh>     m_sphereMesh;
     std::shared_ptr<Material> m_material;
     std::vector<Entity*>      m_cubeActors;
     std::vector<Entity*>      m_spriteActors;
     std::vector<Entity*>      m_blobActors;
     std::vector<Entity*>      m_bulkSpriteActors;
+    std::vector<Entity*>      m_meteorActors;
+    std::vector<ExplosionData> m_explosions;
+    uint32_t                  m_meteorRng = 0xCAFEBABEu;
 };

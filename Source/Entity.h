@@ -31,6 +31,7 @@ public:
     bool isBlobShadow = false;
     bool useInstancing = false;
     vec4 spriteUVRect = vec4(0.0f, 0.0f, 1.0f, 1.0f);
+    vec3 velocity     = vec3(0.0f, 0.0f, 0.0f);
 
     std::vector<vec4> animFrames;
     float animSpeed = 8.0f;

@@ -98,6 +98,51 @@ namespace
         return mesh->Init(device, vertices, indices) ? mesh : nullptr;
     }
 
+    std::shared_ptr<Mesh> CreateSphereMesh(ID3D12Device* device)
+    {
+        constexpr int   stacks = 12;
+        constexpr int   slices = 16;
+        constexpr float radius = 0.5f;
+        constexpr float kPi    = 3.14159265f;
+
+        std::vector<Vertex>   vertices;
+        std::vector<uint32_t> indices;
+
+        for (int i = 0; i <= stacks; ++i)
+        {
+            const float phi    = kPi * (static_cast<float>(i) / stacks - 0.5f);
+            const float cosPhi = cosf(phi);
+            const float sinPhi = sinf(phi);
+            for (int j = 0; j <= slices; ++j)
+            {
+                const float theta = 2.0f * kPi * static_cast<float>(j) / slices;
+                const float nx    = cosPhi * cosf(theta);
+                const float ny    = sinPhi;
+                const float nz    = cosPhi * sinf(theta);
+                vertices.push_back({
+                    vec3(nx * radius, ny * radius, nz * radius),
+                    vec3(nx, ny, nz),
+                    vec4(1, 1, 1, 1),
+                    vec2(static_cast<float>(j) / slices, static_cast<float>(i) / stacks)
+                });
+            }
+        }
+
+        for (int i = 0; i < stacks; ++i)
+        {
+            for (int j = 0; j < slices; ++j)
+            {
+                const uint32_t a = static_cast<uint32_t>(i * (slices + 1) + j);
+                const uint32_t b = a + static_cast<uint32_t>(slices + 1);
+                indices.push_back(a);     indices.push_back(b);     indices.push_back(a + 1);
+                indices.push_back(a + 1); indices.push_back(b);     indices.push_back(b + 1);
+            }
+        }
+
+        auto mesh = std::make_shared<Mesh>();
+        return mesh->Init(device, vertices, indices) ? mesh : nullptr;
+    }
+
     // Flat horizontal quad in XZ plane with full UVs — used for blob circle shadows on the floor
     std::shared_ptr<Mesh> CreateBlobShadowMesh(ID3D12Device* device)
     {
@@ -122,8 +167,9 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
     m_groundMesh = CreateGroundPlaneMesh(dx12.GetDevice());
     m_spriteMesh = CreateSpriteQuadMesh(dx12.GetDevice());
     m_blobMesh   = CreateBlobShadowMesh(dx12.GetDevice());
+    m_sphereMesh = CreateSphereMesh(dx12.GetDevice());
 
-    if (!m_cubeMesh || !m_groundMesh || !m_spriteMesh || !m_blobMesh)
+    if (!m_cubeMesh || !m_groundMesh || !m_spriteMesh || !m_blobMesh || !m_sphereMesh)
     {
         OutputDebugStringW(L"Game::Init failed to create meshes\n");
         return false;
@@ -411,5 +457,143 @@ void Game::Update(float dt, const InputState& input)
         const int frameIndex = static_cast<int>(sprite->animTimer * sprite->animSpeed)
                                % static_cast<int>(sprite->animFrames.size());
         sprite->spriteUVRect = sprite->animFrames[frameIndex];
+    }
+
+    // Summon meteors — M key spawns a volley of red spheres from the sky
+    if (input.summonMeteors && m_sphereMesh)
+    {
+        auto MRng = [this]() -> float {
+            m_meteorRng = m_meteorRng * 1664525u + 1013904223u;
+            return static_cast<float>(m_meteorRng >> 16) / 65535.0f;
+        };
+
+        const int count = 3 + static_cast<int>(MRng() * 3.0f); // 3–5
+        for (int i = 0; i < count; ++i)
+        {
+            const float x    = (MRng() - 0.5f) * 18.0f;
+            const float z    = (MRng() - 0.5f) * 12.0f - 5.0f;
+            const float size = 0.55f + MRng() * 0.55f;
+
+            Entity& meteor = m_scene.CreateEntity();
+            meteor.mesh                 = m_sphereMesh;
+            meteor.material             = m_material;
+            meteor.castsProjectedShadow = true;
+            meteor.transform.SetPosition(x, 22.0f, z);
+            meteor.transform.SetScale(size, size, size);
+            meteor.tint     = vec4(1.0f, 0.12f + MRng() * 0.18f, 0.02f, 1.0f);
+            meteor.velocity = vec3((MRng() - 0.5f) * 2.5f, -8.0f, (MRng() - 0.5f) * 2.5f);
+            m_meteorActors.push_back(&meteor);
+        }
+    }
+
+    // Meteor physics — gravity + removal when below floor
+    constexpr float kMeteorGravity = 20.0f;
+    for (Entity* meteor : m_meteorActors)
+    {
+        meteor->velocity.y -= kMeteorGravity * dt;
+        meteor->transform.position.x += meteor->velocity.x * dt;
+        meteor->transform.position.y += meteor->velocity.y * dt;
+        meteor->transform.position.z += meteor->velocity.z * dt;
+    }
+
+    // Collect meteors that have hit the floor (explicit pass — do NOT rely on remove_if tail)
+    std::vector<Entity*> meteorToDestroy;
+    for (Entity* e : m_meteorActors)
+        if (e->transform.position.y < -1.0f)
+            meteorToDestroy.push_back(e);
+
+    if (!meteorToDestroy.empty())
+    {
+        // Spawn an explosion at each impact site
+        for (Entity* meteor : meteorToDestroy)
+        {
+            const float cx        = meteor->transform.position.x;
+            const float cz        = meteor->transform.position.z;
+            const float maxRadius = 1.8f + meteor->transform.scale.x * 2.0f;
+
+            Entity& expl = m_scene.CreateEntity();
+            expl.mesh                 = m_sphereMesh;
+            expl.material             = m_material;
+            expl.castsProjectedShadow = false;
+            expl.transform.SetPosition(cx, -1.0f, cz);
+            expl.transform.SetScale(0.01f, 0.01f, 0.01f);
+            expl.tint = vec4(1.0f, 0.6f, 0.0f, 1.0f);
+            m_explosions.push_back({ &expl, vec3(cx, -1.0f, cz), 0.0f, 1.0f, maxRadius });
+        }
+
+        // Remove from tracking list using the collected set as the predicate
+        m_meteorActors.erase(
+            std::remove_if(m_meteorActors.begin(), m_meteorActors.end(),
+                [&meteorToDestroy](Entity* e) {
+                    return std::find(meteorToDestroy.begin(), meteorToDestroy.end(), e) != meteorToDestroy.end();
+                }),
+            m_meteorActors.end());
+
+        // Remove from scene
+        auto& ents = m_scene.GetEntities();
+        ents.erase(
+            std::remove_if(ents.begin(), ents.end(),
+                [&meteorToDestroy](const std::unique_ptr<Entity>& e) {
+                    return std::find(meteorToDestroy.begin(), meteorToDestroy.end(), e.get()) != meteorToDestroy.end();
+                }),
+            ents.end());
+    }
+
+    // Cubes are temporarily hidden by explosions — restore each frame so the effect is transient.
+    // Sprites are permanently killed — they are NOT re-enabled here.
+    for (Entity* e : m_cubeActors) if (e) e->enabled = true;
+
+    // Update each explosion: advance age, resize sphere, recolour, disable overlapping entities
+    for (auto& expl : m_explosions)
+    {
+        expl.age += dt;
+        const float progress     = std::min(expl.age / expl.maxAge, 1.0f);
+        const float easedT       = 1.0f - (1.0f - progress) * (1.0f - progress); // ease-out
+        const float radius       = expl.maxRadius * easedT;
+        const float diameter     = radius * 2.0f;
+        expl.sphere->transform.SetScale(diameter, diameter, diameter);
+        expl.sphere->tint = vec4(1.0f, 0.6f * (1.0f - progress), 0.0f, 1.0f); // orange → red
+
+        const float r2 = radius * radius;
+        auto disableIfInside = [&](Entity* e) {
+            if (!e) return;
+            const vec3& p = e->transform.position;
+            const float dx = p.x - expl.center.x;
+            const float dy = p.y - expl.center.y;
+            const float dz = p.z - expl.center.z;
+            if (dx*dx + dy*dy + dz*dz < r2)
+                e->enabled = false;
+        };
+
+        for (Entity* e : m_cubeActors)       disableIfInside(e);
+        for (Entity* e : m_spriteActors)     disableIfInside(e);
+        for (Entity* e : m_bulkSpriteActors) disableIfInside(e);
+    }
+
+    // Blob shadows mirror their sprite's visibility
+    for (size_t i = 0; i < m_spriteActors.size() && i < m_blobActors.size(); ++i)
+        if (m_spriteActors[i] && !m_spriteActors[i]->enabled && m_blobActors[i])
+            m_blobActors[i]->enabled = false;
+
+    // Collect finished explosions (explicit pass — do NOT rely on remove_if tail)
+    std::vector<Entity*> explToDestroy;
+    for (const auto& expl : m_explosions)
+        if (expl.age >= expl.maxAge)
+            explToDestroy.push_back(expl.sphere);
+
+    if (!explToDestroy.empty())
+    {
+        m_explosions.erase(
+            std::remove_if(m_explosions.begin(), m_explosions.end(),
+                [](const ExplosionData& e) { return e.age >= e.maxAge; }),
+            m_explosions.end());
+
+        auto& ents = m_scene.GetEntities();
+        ents.erase(
+            std::remove_if(ents.begin(), ents.end(),
+                [&explToDestroy](const std::unique_ptr<Entity>& e) {
+                    return std::find(explToDestroy.begin(), explToDestroy.end(), e.get()) != explToDestroy.end();
+                }),
+            ents.end());
     }
 }

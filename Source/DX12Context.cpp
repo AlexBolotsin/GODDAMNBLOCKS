@@ -1788,7 +1788,7 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
         m_instanceSortBuf.clear();
         for (auto &entity : scene->GetEntities())
         {
-            if (!entity)
+            if (!entity || !entity->enabled)
                 continue;
 
             if (entity->useInstancing)

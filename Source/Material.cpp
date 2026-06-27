@@ -1,5 +1,6 @@
 #include "Material.h"
 #include <d3dcompiler.h>
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <wincodec.h>
@@ -180,7 +181,7 @@ bool Material::CreateRootSignature(ID3D12Device* device)
 
     D3D12_STATIC_SAMPLER_DESC staticSamplers[2] = {};
 
-    staticSamplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    staticSamplers[0].Filter = D3D12_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR;
     staticSamplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     staticSamplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     staticSamplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -402,13 +403,45 @@ bool Material::CreateTextureResources(ID3D12Device* device, ID3D12CommandQueue* 
         return false;
     }
 
+    struct MipLevel { uint32_t width, height; std::vector<uint8_t> pixels; };
+    uint32_t mipCount = 1;
+    {
+        uint32_t w = textureData.width, h = textureData.height;
+        while (w > 1 || h > 1) { w = std::max(w / 2, 1u); h = std::max(h / 2, 1u); ++mipCount; }
+    }
+    std::vector<MipLevel> mips(mipCount);
+    mips[0] = { textureData.width, textureData.height, textureData.pixels };
+    for (uint32_t m = 1; m < mipCount; ++m)
+    {
+        const MipLevel& s = mips[m - 1];
+        MipLevel& d = mips[m];
+        d.width  = std::max(s.width  / 2, 1u);
+        d.height = std::max(s.height / 2, 1u);
+        d.pixels.resize(d.width * d.height * 4);
+        for (uint32_t y = 0; y < d.height; ++y)
+            for (uint32_t x = 0; x < d.width; ++x)
+            {
+                const uint32_t sx0 = x * 2, sy0 = y * 2;
+                const uint32_t sx1 = std::min(sx0 + 1, s.width  - 1);
+                const uint32_t sy1 = std::min(sy0 + 1, s.height - 1);
+                for (int c = 0; c < 4; ++c)
+                {
+                    const uint32_t sum = s.pixels[(sy0 * s.width + sx0) * 4 + c]
+                                       + s.pixels[(sy0 * s.width + sx1) * 4 + c]
+                                       + s.pixels[(sy1 * s.width + sx0) * 4 + c]
+                                       + s.pixels[(sy1 * s.width + sx1) * 4 + c];
+                    d.pixels[(y * d.width + x) * 4 + c] = static_cast<uint8_t>(sum / 4);
+                }
+            }
+    }
+
     D3D12_RESOURCE_DESC textureDesc = {};
     textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     textureDesc.Alignment = 0;
     textureDesc.Width = textureData.width;
     textureDesc.Height = textureData.height;
     textureDesc.DepthOrArraySize = 1;
-    textureDesc.MipLevels = 1;
+    textureDesc.MipLevels = static_cast<UINT16>(mipCount);
     textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     textureDesc.SampleDesc.Count = 1;
     textureDesc.SampleDesc.Quality = 0;
@@ -429,16 +462,17 @@ bool Material::CreateTextureResources(ID3D12Device* device, ID3D12CommandQueue* 
         return false;
     }
 
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
-    UINT numRows = 0;
-    UINT64 rowSizeInBytes = 0;
-    UINT64 uploadSize = 0;
-    device->GetCopyableFootprints(&textureDesc, 0, 1, 0, &footprint, &numRows, &rowSizeInBytes, &uploadSize);
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(mipCount);
+    std::vector<UINT>   mipNumRows(mipCount);
+    std::vector<UINT64> mipRowSizes(mipCount);
+    UINT64 totalUploadSize = 0;
+    device->GetCopyableFootprints(&textureDesc, 0, mipCount, 0,
+        footprints.data(), mipNumRows.data(), mipRowSizes.data(), &totalUploadSize);
 
     Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer;
     D3D12_RESOURCE_DESC uploadDesc = {};
     uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    uploadDesc.Width = uploadSize;
+    uploadDesc.Width = totalUploadSize;
     uploadDesc.Height = 1;
     uploadDesc.DepthOrArraySize = 1;
     uploadDesc.MipLevels = 1;
@@ -464,13 +498,14 @@ bool Material::CreateTextureResources(ID3D12Device* device, ID3D12CommandQueue* 
     if (FAILED(uploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mappedData))))
         return false;
 
-    const size_t sourceRowPitch = static_cast<size_t>(textureData.width) * 4ull;
-    for (UINT row = 0; row < numRows; ++row)
+    for (uint32_t m = 0; m < mipCount; ++m)
     {
-        memcpy(
-            mappedData + footprint.Offset + static_cast<size_t>(row) * footprint.Footprint.RowPitch,
-            textureData.pixels.data() + static_cast<size_t>(row) * sourceRowPitch,
-            sourceRowPitch);
+        const size_t srcRowPitch = static_cast<size_t>(mips[m].width) * 4ull;
+        for (UINT row = 0; row < mipNumRows[m]; ++row)
+            memcpy(
+                mappedData + footprints[m].Offset + static_cast<size_t>(row) * footprints[m].Footprint.RowPitch,
+                mips[m].pixels.data() + static_cast<size_t>(row) * srcRowPitch,
+                srcRowPitch);
     }
     uploadBuffer->Unmap(0, nullptr);
 
@@ -481,17 +516,20 @@ bool Material::CreateTextureResources(ID3D12Device* device, ID3D12CommandQueue* 
     if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, commandAllocator.Get(), nullptr, IID_PPV_ARGS(&commandList))))
         return false;
 
-    D3D12_TEXTURE_COPY_LOCATION dstLocation = {};
-    dstLocation.pResource = m_texture.Get();
-    dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dstLocation.SubresourceIndex = 0;
+    for (uint32_t m = 0; m < mipCount; ++m)
+    {
+        D3D12_TEXTURE_COPY_LOCATION dstLocation = {};
+        dstLocation.pResource        = m_texture.Get();
+        dstLocation.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dstLocation.SubresourceIndex = m;
 
-    D3D12_TEXTURE_COPY_LOCATION srcLocation = {};
-    srcLocation.pResource = uploadBuffer.Get();
-    srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    srcLocation.PlacedFootprint = footprint;
+        D3D12_TEXTURE_COPY_LOCATION srcLocation = {};
+        srcLocation.pResource       = uploadBuffer.Get();
+        srcLocation.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        srcLocation.PlacedFootprint = footprints[m];
 
-    commandList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, nullptr);
+        commandList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, nullptr);
+    }
 
     D3D12_RESOURCE_BARRIER barrier = {};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -546,7 +584,7 @@ bool Material::CreateTextureResources(ID3D12Device* device, ID3D12CommandQueue* 
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Texture2D.MipLevels = 1;
+    srvDesc.Texture2D.MipLevels = mipCount;
     device->CreateShaderResourceView(m_texture.Get(), &srvDesc, m_srvHeap->GetCPUDescriptorHandleForHeapStart());
 
     return true;

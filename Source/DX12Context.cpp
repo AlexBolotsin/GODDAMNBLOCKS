@@ -1120,8 +1120,8 @@ float4 PSMain(VSOut i) : SV_TARGET
 
     D3D12_STATIC_SAMPLER_DESC staticSamplers[2] = {};
 
-    // s0 — sprite atlas (POINT, CLAMP)
-    staticSamplers[0].Filter           = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    // s0 — sprite atlas: point mag (crisp up close), linear min+mip (smooth at distance)
+    staticSamplers[0].Filter           = D3D12_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR;
     staticSamplers[0].AddressU         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     staticSamplers[0].AddressV         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     staticSamplers[0].AddressW         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;

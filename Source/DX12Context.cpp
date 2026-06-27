@@ -989,17 +989,24 @@ struct SpriteInstance
 {
     row_major float4x4 world;
     float4             uvRect;
+    float4             tint;   // rgb = per-sprite colour tint
 };
 StructuredBuffer<SpriteInstance> g_instances : register(t0);
 
-Texture2D    g_sprite  : register(t1);
-SamplerState g_sampler : register(s0);
+Texture2D              g_sprite    : register(t1);
+Texture2D              g_shadowMap : register(t2);
+SamplerState           g_sampler   : register(s0);
+SamplerComparisonState g_shadowSmp : register(s1);
 
 struct VSOut
 {
-    float4 pos   : SV_POSITION;
-    float2 uv    : TEXCOORD0;
-    float3 viewV : TEXCOORD1;
+    float4 pos      : SV_POSITION;
+    float2 uv       : TEXCOORD0;
+    float3 viewV    : TEXCOORD1;
+    float2 clipYW   : TEXCOORD2;  // for sky-gradient fog
+    float  localV   : TEXCOORD3;  // raw quad V (0=bottom, 1=top) for base AO
+    float3 worldPos : TEXCOORD4;  // world position for shadow projection
+    float3 tintRGB  : TEXCOORD5;  // per-instance colour tint
 };
 
 static const float3 kPos[6] = {
@@ -1017,9 +1024,13 @@ VSOut VSMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
     float4 wp  = mul(float4(kPos[vid], 1.0f), inst.world);
     float4 vp  = mul(wp, viewMatrix);
     VSOut o;
-    o.pos  = mul(vp, projMatrix);
-    o.uv   = lerp(inst.uvRect.xy, inst.uvRect.zw, kUV[vid]);
-    o.viewV = vp.xyz;
+    o.pos      = mul(vp, projMatrix);
+    o.uv       = lerp(inst.uvRect.xy, inst.uvRect.zw, kUV[vid]);
+    o.viewV    = vp.xyz;
+    o.clipYW   = float2(o.pos.y, o.pos.w);
+    o.localV   = kUV[vid].y;
+    o.worldPos = wp.xyz;
+    o.tintRGB  = inst.tint.rgb;
     return o;
 }
 
@@ -1029,10 +1040,31 @@ float4 PSMain(VSOut i) : SV_TARGET
     float3 chroma = float3(34.0f / 255.0f, 177.0f / 255.0f, 76.0f / 255.0f);
     float  alpha  = texel.a * smoothstep(0.10f, 0.16f, distance(texel.rgb, chroma));
     clip(alpha - 0.05f);
+
+    float3 rgb = texel.rgb * i.tintRGB;
+
+    // Base AO: darken sprite feet — grounds the sprite visually
+    rgb *= lerp(0.55f, 1.0f, i.localV);
+
+    // Shadow map receive — only sample when sprite is inside the light frustum
+    float4 lsPos    = mul(float4(i.worldPos, 1.0f), lightViewProjMatrix);
+    lsPos.xyz      /= lsPos.w;
+    float2 shadowUV = lsPos.xy * float2(0.5f, -0.5f) + 0.5f;
+    float  shadow   = 1.0f;  // default: fully lit (outside light frustum = no shadow)
+    if (lsPos.x >= -1.0f && lsPos.x <= 1.0f &&
+        lsPos.y >= -1.0f && lsPos.y <= 1.0f &&
+        lsPos.z >=  0.0f && lsPos.z <= 1.0f)
+        shadow = g_shadowMap.SampleCmpLevelZero(g_shadowSmp, shadowUV, lsPos.z - 0.001f);
+    rgb *= lerp(0.35f, 1.0f, shadow);
+
+    // Distance fog with sky-gradient colour (matches Material.hlsl)
     float  camDist   = length(i.viewV);
     float  fogFactor = saturate((camDist - 8.0f) / (22.0f - 8.0f));
-    float3 fogColor  = float3(0.64f, 0.70f, 0.78f);
-    float3 rgb       = lerp(texel.rgb, fogColor, fogFactor * 0.35f);
+    float  ndcY      = i.clipYW.x / max(abs(i.clipYW.y), 1e-4f);
+    float  skyT      = saturate(ndcY * 0.5f + 0.5f);
+    float3 fogColor  = lerp(float3(0.64f, 0.70f, 0.78f), float3(0.24f, 0.38f, 0.62f), skyT);
+    rgb = lerp(rgb, fogColor, fogFactor * 0.35f);
+
     return float4(saturate(rgb), alpha);
 }
 )";
@@ -1073,10 +1105,11 @@ float4 PSMain(VSOut i) : SV_TARGET
     rootParams[1].Descriptor.RegisterSpace  = 0;
     rootParams[1].ShaderVisibility          = D3D12_SHADER_VISIBILITY_VERTEX;
 
+    // Covers t1=sprite (heap slot 0) and t2=shadowMap (heap slot 1) from the material heap
     D3D12_DESCRIPTOR_RANGE spriteRange = {};
     spriteRange.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    spriteRange.NumDescriptors     = 1;
-    spriteRange.BaseShaderRegister = 1;  // t1
+    spriteRange.NumDescriptors     = 2;
+    spriteRange.BaseShaderRegister = 1;  // t1, t2
     spriteRange.RegisterSpace      = 0;
     spriteRange.OffsetInDescriptorsFromTableStart = 0;
 
@@ -1085,21 +1118,33 @@ float4 PSMain(VSOut i) : SV_TARGET
     rootParams[2].DescriptorTable.pDescriptorRanges   = &spriteRange;
     rootParams[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    D3D12_STATIC_SAMPLER_DESC staticSampler = {};
-    staticSampler.Filter           = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT;
-    staticSampler.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    staticSampler.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    staticSampler.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    staticSampler.ComparisonFunc   = D3D12_COMPARISON_FUNC_NEVER;
-    staticSampler.MaxLOD           = D3D12_FLOAT32_MAX;
-    staticSampler.ShaderRegister   = 0;  // s0
-    staticSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_STATIC_SAMPLER_DESC staticSamplers[2] = {};
+
+    // s0 — sprite atlas (POINT, CLAMP)
+    staticSamplers[0].Filter           = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    staticSamplers[0].AddressU         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].AddressV         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].AddressW         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[0].ComparisonFunc   = D3D12_COMPARISON_FUNC_NEVER;
+    staticSamplers[0].MaxLOD           = D3D12_FLOAT32_MAX;
+    staticSamplers[0].ShaderRegister   = 0;  // s0
+    staticSamplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    // s1 — shadow comparison sampler
+    staticSamplers[1].Filter           = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+    staticSamplers[1].AddressU         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[1].AddressV         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[1].AddressW         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    staticSamplers[1].ComparisonFunc   = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    staticSamplers[1].MaxLOD           = D3D12_FLOAT32_MAX;
+    staticSamplers[1].ShaderRegister   = 1;  // s1
+    staticSamplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
     rootSigDesc.NumParameters     = 3;
     rootSigDesc.pParameters       = rootParams;
-    rootSigDesc.NumStaticSamplers = 1;
-    rootSigDesc.pStaticSamplers   = &staticSampler;
+    rootSigDesc.NumStaticSamplers = 2;
+    rootSigDesc.pStaticSamplers   = staticSamplers;
     rootSigDesc.Flags             = D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS
                                   | D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS
                                   | D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
@@ -1145,10 +1190,10 @@ float4 PSMain(VSOut i) : SV_TARGET
     if (FAILED(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_instancedSpritePso))))
         return false;
 
-    // Upload buffer: FrameCount regions × kMaxSpriteInstances × 80 bytes per instance
-    // (64 bytes mat4 world + 16 bytes vec4 uvRect)
+    // Upload buffer: FrameCount regions × kMaxSpriteInstances × 96 bytes per instance
+    // (64 bytes mat4 world + 16 bytes vec4 uvRect + 16 bytes vec4 tint)
     {
-        const UINT64 bufferSize = static_cast<UINT64>(FrameCount) * kMaxSpriteInstances * 80ull;
+        const UINT64 bufferSize = static_cast<UINT64>(FrameCount) * kMaxSpriteInstances * 96ull;
         D3D12_HEAP_PROPERTIES hp = {};
         hp.Type = D3D12_HEAP_TYPE_UPLOAD;
         D3D12_RESOURCE_DESC rd = {};
@@ -1728,8 +1773,8 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
         memcpy(m_perFrameCbMapped + 256 * m_frameIndex, &cbData, sizeof(cbData));
         frameData.perFrameGpuAddr = m_perFrameCb->GetGPUVirtualAddress() + 256 * m_frameIndex;
 
-        // Per-instance data layout must match the HLSL SpriteInstance struct (80 bytes)
-        struct SpriteInstanceData { mat4 world; vec4 uvRect; };
+        // Per-instance data layout must match the HLSL SpriteInstance struct (96 bytes)
+        struct SpriteInstanceData { mat4 world; vec4 uvRect; vec4 tint; };
 
         SpriteInstanceData* instanceDst = reinterpret_cast<SpriteInstanceData*>(m_spriteInstanceMapped)
                                           + m_frameIndex * kMaxSpriteInstances;
@@ -1786,6 +1831,7 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
             instanceDst[i].world  = MatrixBillboard(
                 e->transform.position, e->transform.scale, camera.eye);
             instanceDst[i].uvRect = e->spriteUVRect;
+            instanceDst[i].tint   = e->tint;
         }
 
         // Single instanced draw replaces the 5000 individual draws
@@ -1802,7 +1848,7 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
             // Param 1: root SRV pointing to this frame's region of the instance buffer
             const D3D12_GPU_VIRTUAL_ADDRESS instAddr =
                 m_spriteInstanceBuffer->GetGPUVirtualAddress()
-                + static_cast<UINT64>(m_frameIndex) * kMaxSpriteInstances * 80ull;
+                + static_cast<UINT64>(m_frameIndex) * kMaxSpriteInstances * 96ull;
             m_commandList->SetGraphicsRootShaderResourceView(1, instAddr);
 
             // Param 2: descriptor table — heap slot 0 (sprite atlas) → shader register t1

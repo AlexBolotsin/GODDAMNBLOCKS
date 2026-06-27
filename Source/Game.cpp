@@ -333,6 +333,11 @@ void Game::Update(float dt, const InputState& input)
     m_time += dt;
     const float t = m_time;
 
+    auto PRng = [this]() -> float {
+        m_particleRng = m_particleRng * 1664525u + 1013904223u;
+        return static_cast<float>(m_particleRng >> 16) / 65535.0f;
+    };
+
     if (input.cinematicToggled)
         m_cinematicMode = !m_cinematicMode;
 
@@ -496,6 +501,27 @@ void Game::Update(float dt, const InputState& input)
         meteor->transform.position.z += meteor->velocity.z * dt;
     }
 
+    // Emit fire trail particles from each falling meteor
+    for (const Entity* meteor : m_meteorActors)
+    {
+        const vec3& mp         = meteor->transform.position;
+        const float meteorSize = meteor->transform.scale.x;
+        for (int k = 0; k < 3; ++k)
+        {
+            m_fireParticles.push_back({
+                vec3(mp.x + (PRng() - 0.5f) * meteorSize * 0.5f,
+                     mp.y + PRng() * meteorSize * 0.6f,
+                     mp.z + (PRng() - 0.5f) * meteorSize * 0.5f),
+                vec3((PRng() - 0.5f) * 0.8f,
+                     0.4f + PRng() * 1.6f,
+                     (PRng() - 0.5f) * 0.8f),
+                0.0f,
+                0.22f + PRng() * 0.18f,
+                0.07f + PRng() * 0.09f + meteorSize * 0.07f
+            });
+        }
+    }
+
     // Collect meteors that have hit the floor (explicit pass — do NOT rely on remove_if tail)
     std::vector<Entity*> meteorToDestroy;
     for (Entity* e : m_meteorActors)
@@ -568,12 +594,99 @@ void Game::Update(float dt, const InputState& input)
         for (Entity* e : m_cubeActors)       disableIfInside(e);
         for (Entity* e : m_spriteActors)     disableIfInside(e);
         for (Entity* e : m_bulkSpriteActors) disableIfInside(e);
+
+        // Scorch ring: sprites between kill radius and 1.8× start burning
+        const float scorchR2 = (radius * 1.8f) * (radius * 1.8f);
+        auto startBurning = [&](Entity* e) {
+            if (!e || !e->enabled || e->isBurning) return;
+            const vec3& p = e->transform.position;
+            const float dx = p.x - expl.center.x;
+            const float dy = p.y - expl.center.y;
+            const float dz = p.z - expl.center.z;
+            const float d2 = dx*dx + dy*dy + dz*dz;
+            if (d2 > r2 && d2 < scorchR2) {
+                e->isBurning = true;
+                m_burningSprites.push_back({ e, 0.0f, 0.5f + PRng() * 0.6f, e->tint });
+            }
+        };
+        for (Entity* e : m_spriteActors)     startBurning(e);
+        for (Entity* e : m_bulkSpriteActors) startBurning(e);
     }
 
     // Blob shadows mirror their sprite's visibility
     for (size_t i = 0; i < m_spriteActors.size() && i < m_blobActors.size(); ++i)
         if (m_spriteActors[i] && !m_spriteActors[i]->enabled && m_blobActors[i])
             m_blobActors[i]->enabled = false;
+
+    // Update burning sprites — shift tint orange→dark, emit particles, kill on burnout
+    for (auto& bs : m_burningSprites)
+    {
+        if (!bs.entity->enabled) { bs.age = bs.duration; continue; } // already kill-zoned
+        bs.age += dt;
+        const float bt = bs.age / bs.duration;
+
+        if (bt < 0.45f) {
+            const float u = bt / 0.45f;
+            bs.entity->tint = vec4(
+                bs.origTint.x + (1.0f - bs.origTint.x) * u,
+                bs.origTint.y * (1.0f - u) + 0.25f * u,
+                bs.origTint.z * (1.0f - u),
+                1.0f);
+        } else {
+            const float u = (bt - 0.45f) / 0.55f;
+            bs.entity->tint = vec4(1.0f - u * 0.85f, 0.25f * (1.0f - u), 0.0f, 1.0f);
+        }
+
+        if (PRng() < 0.65f) {
+            const vec3& sp = bs.entity->transform.position;
+            m_fireParticles.push_back({
+                vec3(sp.x + (PRng()-0.5f)*0.4f, sp.y + PRng()*0.5f, sp.z + (PRng()-0.5f)*0.4f),
+                vec3((PRng()-0.5f)*0.5f, 0.9f + PRng()*1.4f, (PRng()-0.5f)*0.5f),
+                0.0f,
+                0.35f + PRng() * 0.2f,
+                0.05f + PRng() * 0.05f
+            });
+        }
+
+        if (bs.age >= bs.duration) {
+            bs.entity->enabled = false;
+            for (size_t si = 0; si < m_spriteActors.size() && si < m_blobActors.size(); ++si)
+                if (m_spriteActors[si] == bs.entity && m_blobActors[si])
+                    m_blobActors[si]->enabled = false;
+        }
+    }
+    m_burningSprites.erase(
+        std::remove_if(m_burningSprites.begin(), m_burningSprites.end(),
+            [](const BurningSprite& bs) { return bs.age >= bs.duration; }),
+        m_burningSprites.end());
+
+    // Fire particle physics — rise with slight deceleration, age out
+    for (auto& fp : m_fireParticles)
+    {
+        fp.vel.y   = std::max(fp.vel.y - 2.5f * dt, 0.15f);
+        fp.pos.x  += fp.vel.x * dt;
+        fp.pos.y  += fp.vel.y * dt;
+        fp.pos.z  += fp.vel.z * dt;
+        fp.age    += dt;
+    }
+    m_fireParticles.erase(
+        std::remove_if(m_fireParticles.begin(), m_fireParticles.end(),
+            [](const FireParticle& fp) { return fp.age >= fp.maxAge; }),
+        m_fireParticles.end());
+
+    // Build scene particle list for the renderer
+    auto& sceneParts = m_scene.GetParticles();
+    sceneParts.clear();
+    sceneParts.reserve(m_fireParticles.size());
+    for (const auto& fp : m_fireParticles)
+    {
+        const float pt    = fp.age / fp.maxAge;
+        const float alpha = (1.0f - pt) * (1.0f - pt * 0.5f);
+        const float g     = std::max(0.0f, 0.75f - pt * 1.1f);
+        const float b     = std::max(0.0f, 0.10f - pt * 0.35f);
+        const float sz    = fp.startSize * std::max(0.1f, 1.0f - pt * 0.55f);
+        sceneParts.push_back({ fp.pos.x, fp.pos.y, fp.pos.z, sz, 1.0f, g, b, alpha });
+    }
 
     // Collect finished explosions (explicit pass — do NOT rely on remove_if tail)
     std::vector<Entity*> explToDestroy;

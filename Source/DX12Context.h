@@ -51,6 +51,7 @@ private:
     bool CreateShadowPipeline();
     bool CreateShadowSpritePipeline();
     bool CreateInstancedSpritePipeline();
+    bool CreateParticlePipeline();
     bool CreatePostProcessResources();
     bool CreatePostProcessPipelines();
     void WaitForGpu();
@@ -86,6 +87,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_spriteInstanceBuffer;
     uint8_t*                                      m_spriteInstanceMapped = nullptr;
     static constexpr uint32_t kMaxSpriteInstances = 5000;
+
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_particlePso;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_particleRootSig;
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_particleBuffer;
+    uint8_t*                                      m_particleMapped = nullptr;
+    static constexpr uint32_t kMaxParticles = 8000;
     std::vector<std::pair<float, const Entity*>> m_instanceSortBuf;
     mat4  m_lightViewProj;
     vec3  m_lightPos;

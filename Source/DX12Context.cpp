@@ -232,6 +232,12 @@ bool DX12Context::Init(HWND hwnd, uint32_t width, uint32_t height)
         return false;
     }
 
+    if (!CreateParticlePipeline())
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreateParticlePipeline\n");
+        return false;
+    }
+
     if (!CreatePostProcessResources())
     {
         OutputDebugStringA("DX12Context::Init failed in CreatePostProcessResources\n");
@@ -1218,6 +1224,178 @@ float4 PSMain(VSOut i) : SV_TARGET
     return true;
 }
 
+bool DX12Context::CreateParticlePipeline()
+{
+    static const char* kShader = R"(
+cbuffer PerFrame : register(b0)
+{
+    row_major float4x4 viewMatrix;
+    row_major float4x4 projMatrix;
+    row_major float4x4 lightViewProjMatrix;
+    float3 cameraEyeWS;
+    float  _pad;
+};
+
+struct ParticleData
+{
+    float3 position;
+    float  size;
+    float4 color;
+};
+
+StructuredBuffer<ParticleData> g_particles : register(t0);
+
+static const float2 kQuad[6] =
+{
+    float2(-0.5f, -0.5f), float2( 0.5f, -0.5f), float2( 0.5f,  0.5f),
+    float2(-0.5f, -0.5f), float2( 0.5f,  0.5f), float2(-0.5f,  0.5f)
+};
+
+struct VSOut
+{
+    float4 pos   : SV_POSITION;
+    float4 color : COLOR;
+    float2 uv    : TEXCOORD;
+};
+
+VSOut VSMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
+{
+    ParticleData p = g_particles[iid];
+    float3 right = float3(viewMatrix[0][0], viewMatrix[0][1], viewMatrix[0][2]);
+    float3 up    = float3(viewMatrix[1][0], viewMatrix[1][1], viewMatrix[1][2]);
+    float3 wpos  = p.position
+                 + right * (kQuad[vid].x * p.size)
+                 + up    * (kQuad[vid].y * p.size);
+    float4 vpos  = mul(float4(wpos, 1.0f), viewMatrix);
+    VSOut o;
+    o.pos   = mul(vpos, projMatrix);
+    o.color = p.color;
+    o.uv    = kQuad[vid] + 0.5f;
+    return o;
+}
+
+float4 PSMain(VSOut i) : SV_TARGET
+{
+    float2 uv    = i.uv * 2.0f - 1.0f;
+    float  r2    = dot(uv, uv);
+    clip(1.0f - r2);
+    float  edge  = 1.0f - r2;
+    float3 hot   = float3(1.0f, 0.95f, 0.70f);
+    float3 col   = lerp(i.color.rgb, hot, edge * edge * 0.5f);
+    float  alpha = edge * i.color.a;
+    return float4(col, alpha);
+}
+)";
+
+    UINT compileFlags = 0;
+#if defined(_DEBUG)
+    compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+
+    Microsoft::WRL::ComPtr<ID3DBlob> vsBlob, psBlob, errorBlob;
+    if (FAILED(D3DCompile(kShader, strlen(kShader), nullptr, nullptr, nullptr,
+                          "VSMain", "vs_5_0", compileFlags, 0, &vsBlob, &errorBlob)))
+    {
+        if (errorBlob) OutputDebugStringA(static_cast<const char*>(errorBlob->GetBufferPointer()));
+        return false;
+    }
+    errorBlob.Reset();
+    if (FAILED(D3DCompile(kShader, strlen(kShader), nullptr, nullptr, nullptr,
+                          "PSMain", "ps_5_0", compileFlags, 0, &psBlob, &errorBlob)))
+    {
+        if (errorBlob) OutputDebugStringA(static_cast<const char*>(errorBlob->GetBufferPointer()));
+        return false;
+    }
+
+    // Root sig: param 0 = root CBV b0 (ALL), param 1 = root SRV t0 (VS only)
+    D3D12_ROOT_PARAMETER rootParams[2] = {};
+    rootParams[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    rootParams[0].Descriptor.ShaderRegister = 0;
+    rootParams[0].Descriptor.RegisterSpace  = 0;
+    rootParams[0].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
+
+    rootParams[1].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    rootParams[1].Descriptor.ShaderRegister = 0;
+    rootParams[1].Descriptor.RegisterSpace  = 0;
+    rootParams[1].ShaderVisibility          = D3D12_SHADER_VISIBILITY_VERTEX;
+
+    D3D12_ROOT_SIGNATURE_DESC rsDesc = {};
+    rsDesc.NumParameters = 2;
+    rsDesc.pParameters   = rootParams;
+    rsDesc.Flags         = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    Microsoft::WRL::ComPtr<ID3DBlob> rsBlob;
+    if (FAILED(D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+                                           &rsBlob, &errorBlob)))
+    {
+        if (errorBlob) OutputDebugStringA(static_cast<const char*>(errorBlob->GetBufferPointer()));
+        return false;
+    }
+    if (FAILED(m_device->CreateRootSignature(0, rsBlob->GetBufferPointer(),
+                                              rsBlob->GetBufferSize(),
+                                              IID_PPV_ARGS(&m_particleRootSig))))
+        return false;
+
+    // Additive blending: src*src_alpha + dst*1
+    D3D12_RENDER_TARGET_BLEND_DESC blendDesc = {};
+    blendDesc.BlendEnable           = TRUE;
+    blendDesc.SrcBlend              = D3D12_BLEND_SRC_ALPHA;
+    blendDesc.DestBlend             = D3D12_BLEND_ONE;
+    blendDesc.BlendOp               = D3D12_BLEND_OP_ADD;
+    blendDesc.SrcBlendAlpha         = D3D12_BLEND_ONE;
+    blendDesc.DestBlendAlpha        = D3D12_BLEND_ZERO;
+    blendDesc.BlendOpAlpha          = D3D12_BLEND_OP_ADD;
+    blendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+    psoDesc.pRootSignature                   = m_particleRootSig.Get();
+    psoDesc.VS                               = { vsBlob->GetBufferPointer(), vsBlob->GetBufferSize() };
+    psoDesc.PS                               = { psBlob->GetBufferPointer(), psBlob->GetBufferSize() };
+    psoDesc.BlendState.RenderTarget[0]       = blendDesc;
+    psoDesc.SampleMask                       = UINT_MAX;
+    psoDesc.RasterizerState.FillMode         = D3D12_FILL_MODE_SOLID;
+    psoDesc.RasterizerState.CullMode         = D3D12_CULL_MODE_NONE;
+    psoDesc.RasterizerState.DepthClipEnable  = TRUE;
+    psoDesc.DepthStencilState.DepthEnable    = TRUE;
+    psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    psoDesc.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+    psoDesc.PrimitiveTopologyType            = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    psoDesc.NumRenderTargets                 = 1;
+    psoDesc.RTVFormats[0]                    = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    psoDesc.DSVFormat                        = DXGI_FORMAT_D32_FLOAT;
+    psoDesc.SampleDesc.Count                 = m_msaaSampleCount;
+    psoDesc.SampleDesc.Quality               = 0;
+
+    if (FAILED(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_particlePso))))
+        return false;
+
+    // Double-buffered upload buffer — 32 bytes per particle (float3 pos, float size, float4 color)
+    {
+        const UINT64 bufferSize = static_cast<UINT64>(FrameCount) * kMaxParticles * 32ull;
+        D3D12_HEAP_PROPERTIES hp = {};
+        hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC rd = {};
+        rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width            = bufferSize;
+        rd.Height           = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels        = 1;
+        rd.Format           = DXGI_FORMAT_UNKNOWN;
+        rd.SampleDesc.Count = 1;
+        rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(m_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                     D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                     nullptr,
+                                                     IID_PPV_ARGS(&m_particleBuffer))))
+            return false;
+        D3D12_RANGE readRange = { 0, 0 };
+        m_particleBuffer->Map(0, &readRange,
+                              reinterpret_cast<void**>(&m_particleMapped));
+    }
+
+    return true;
+}
+
 bool DX12Context::CreatePostProcessResources()
 {
     m_hdrTarget.Reset();
@@ -1858,6 +2036,30 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
             m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             m_commandList->DrawInstanced(6, instanceCount, 0, 0);
             ++m_drawCallCount;
+        }
+
+        // Fire particle pass — additive billboards, depth test on, no depth write
+        {
+            const auto&    sceneParts = scene->GetParticles();
+            const uint32_t pCount     = static_cast<uint32_t>(
+                std::min(sceneParts.size(), static_cast<size_t>(kMaxParticles)));
+            if (pCount > 0 && m_particlePso && m_particleBuffer)
+            {
+                uint8_t* dst = m_particleMapped
+                             + static_cast<size_t>(m_frameIndex) * kMaxParticles * 32;
+                memcpy(dst, sceneParts.data(), pCount * 32);
+
+                m_commandList->SetPipelineState(m_particlePso.Get());
+                m_commandList->SetGraphicsRootSignature(m_particleRootSig.Get());
+                m_commandList->SetGraphicsRootConstantBufferView(0, frameData.perFrameGpuAddr);
+                const D3D12_GPU_VIRTUAL_ADDRESS pAddr =
+                    m_particleBuffer->GetGPUVirtualAddress()
+                    + static_cast<UINT64>(m_frameIndex) * kMaxParticles * 32ull;
+                m_commandList->SetGraphicsRootShaderResourceView(1, pAddr);
+                m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                m_commandList->DrawInstanced(6, pCount, 0, 0);
+                ++m_drawCallCount;
+            }
         }
     }
 

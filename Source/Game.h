@@ -21,6 +21,23 @@ class Game
         float   maxRadius;
     };
 
+    struct FireParticle
+    {
+        vec3  pos;
+        vec3  vel;
+        float age;
+        float maxAge;
+        float startSize;
+    };
+
+    struct BurningSprite
+    {
+        Entity* entity;
+        float   age;
+        float   duration;
+        vec4    origTint;
+    };
+
 public:
     bool Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spriteSheetPath);
     void Update(float dt, const InputState& input);
@@ -49,7 +66,10 @@ private:
     std::vector<Entity*>      m_spriteActors;
     std::vector<Entity*>      m_blobActors;
     std::vector<Entity*>      m_bulkSpriteActors;
-    std::vector<Entity*>      m_meteorActors;
+    std::vector<Entity*>       m_meteorActors;
     std::vector<ExplosionData> m_explosions;
-    uint32_t                  m_meteorRng = 0xCAFEBABEu;
+    std::vector<FireParticle>  m_fireParticles;
+    std::vector<BurningSprite> m_burningSprites;
+    uint32_t                   m_meteorRng   = 0xCAFEBABEu;
+    uint32_t                   m_particleRng = 0xFEDCBA98u;
 };

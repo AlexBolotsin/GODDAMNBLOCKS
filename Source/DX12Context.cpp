@@ -1065,7 +1065,7 @@ float4 PSMain(VSOut i) : SV_TARGET
 
     // Distance fog with sky-gradient colour (matches Material.hlsl)
     float  camDist   = length(i.viewV);
-    float  fogFactor = saturate((camDist - 8.0f) / (22.0f - 8.0f));
+    float  fogFactor = saturate((camDist - 20.0f) / (65.0f - 20.0f));
     float  ndcY      = i.clipYW.x / max(abs(i.clipYW.y), 1e-4f);
     float  skyT      = saturate(ndcY * 0.5f + 0.5f);
     float3 fogColor  = lerp(float3(0.64f, 0.70f, 0.78f), float3(0.24f, 0.38f, 0.62f), skyT);

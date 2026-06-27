@@ -103,8 +103,8 @@ float4 PSMain(PSInput input) : SV_TARGET
         clip(spriteAlpha - 0.05f);
 
         float cameraDistance = length(input.viewPos);
-        float fogStart = 8.0f;
-        float fogEnd = 22.0f;
+        float fogStart = 20.0f;
+        float fogEnd = 65.0f;
         float fogFactor = saturate((cameraDistance - fogStart) / (fogEnd - fogStart));
 
         float ndcY = input.clipYW.x / max(abs(input.clipYW.y), 1e-4f);
@@ -186,6 +186,6 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 skyZenith = float3(0.24f, 0.38f, 0.62f);
     float3 fogColor = lerp(skyHorizon, skyZenith, skyT);
 
-    float3 finalColor = lerp(litColor, fogColor, fogFactor);
+    float3 finalColor = lerp(litColor, fogColor, fogFactor * 0.7f);
     return float4(finalColor, input.color.a);
 }

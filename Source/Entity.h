@@ -32,7 +32,9 @@ public:
     bool useInstancing = false;
     vec4 spriteUVRect = vec4(0.0f, 0.0f, 1.0f, 1.0f);
     vec3 velocity     = vec3(0.0f, 0.0f, 0.0f);
-    bool isBurning    = false;
+    bool  isBurning   = false;
+    bool  isUnlit     = false;
+    float hoverPhase  = 0.0f; // per-sprite random phase for GPU hover animation
 
     std::vector<vec4> animFrames;
     float animSpeed = 8.0f;

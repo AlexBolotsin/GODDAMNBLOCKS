@@ -37,7 +37,7 @@ void Entity::Draw(
     perObjectData.color = tintOverride ? *tintOverride : tint;
     perObjectData.renderParams = shadowPass
         ? vec4(1.0f, usesSpriteTexture ? 1.0f : 0.0f, 0.0f, 0.0f)
-        : vec4(isBlobShadow ? 1.0f : 0.0f, usesSpriteTexture ? 1.0f : 0.0f, 0.0f, 0.0f);
+        : vec4(isBlobShadow ? 1.0f : 0.0f, usesSpriteTexture ? 1.0f : 0.0f, isUnlit ? 1.0f : 0.0f, 0.0f);
     perObjectData.spriteUVRect = spriteUVRect;
 
     commandList->SetGraphicsRoot32BitConstants(1, sizeof(perObjectData) / 4, &perObjectData, 0);

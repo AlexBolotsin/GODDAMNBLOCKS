@@ -196,6 +196,8 @@ namespace
 
 bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spriteSheetPath)
 {
+    m_camera.target = vec3(0.0f, 0.0f, -5.0f);
+
     m_cubeMesh       = CreateCubeMesh(dx12.GetDevice());
     m_groundMesh     = CreateGroundPlaneMesh(dx12.GetDevice());
     m_spriteMesh     = CreateSpriteQuadMesh(dx12.GetDevice());
@@ -239,6 +241,7 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
         ring.mesh                 = m_targetRingMesh;
         ring.material             = m_material;
         ring.castsProjectedShadow = false;
+        ring.isUnlit              = true;
         ring.enabled              = false;
         m_targetRing              = &ring;
     }
@@ -362,6 +365,7 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
         sprite.animFrames           = kAnimSets[row];
         sprite.animTimer            = Rng() * 4.0f; // stagger starting frame
         sprite.useInstancing        = true;
+        sprite.hoverPhase           = static_cast<float>(i) * 0.13f;
         sprite.tint = vec4(0.88f + Rng() * 0.24f,
                            0.88f + Rng() * 0.24f,
                            0.88f + Rng() * 0.24f,
@@ -376,6 +380,8 @@ void Game::Update(float dt, const InputState& input)
 {
     m_time += dt;
     const float t = m_time;
+
+    m_scene.SetTime(m_time);
 
     auto PRng = [this]() -> float {
         m_particleRng = m_particleRng * 1664525u + 1013904223u;
@@ -416,9 +422,18 @@ void Game::Update(float dt, const InputState& input)
             m_camElevation -= static_cast<float>(input.mouseDeltaY) * kOrbitSensitivity;
             m_camElevation  = std::max(kMinElevation, std::min(kMaxElevation, m_camElevation));
         }
+        if (input.middleMouseHeld)
+        {
+            const float panSpeed     = m_camRadius * 0.004f;
+            const vec3  camRight     = { -sinf(m_camAzimuth), 0.0f,  cosf(m_camAzimuth) };
+            const vec3  camFwdGround = { -cosf(m_camAzimuth), 0.0f, -sinf(m_camAzimuth) };
+            m_camera.target.x -= camRight.x     * static_cast<float>(input.mouseDeltaX) * panSpeed;
+            m_camera.target.z -= camRight.z     * static_cast<float>(input.mouseDeltaX) * panSpeed;
+            m_camera.target.x -= camFwdGround.x * static_cast<float>(input.mouseDeltaY) * panSpeed;
+            m_camera.target.z -= camFwdGround.z * static_cast<float>(input.mouseDeltaY) * panSpeed;
+        }
         m_camRadius    -= static_cast<float>(input.scrollDelta) * kZoomSensitivity;
         m_camRadius     = std::max(kMinRadius, std::min(kMaxRadius, m_camRadius));
-        m_camera.target = vec3(0.0f, 0.0f, -5.0f);
     }
 
     const float cosEl = cosf(m_camElevation);
@@ -467,6 +482,7 @@ void Game::Update(float dt, const InputState& input)
     }
 
     // Update targeting ring gizmo
+    constexpr float kTargetRadius = 2.5f; // ring scale = meteor scatter radius
     if (m_targetRing)
     {
         m_targetRing->enabled = m_hasTarget;
@@ -474,7 +490,7 @@ void Game::Update(float dt, const InputState& input)
         {
             const float pulse = 0.65f + 0.35f * sinf(t * 5.0f);
             m_targetRing->transform.SetPosition(m_targetPos.x, -0.97f, m_targetPos.z);
-            m_targetRing->transform.SetScale(2.8f, 1.0f, 2.8f);
+            m_targetRing->transform.SetScale(kTargetRadius, 1.0f, kTargetRadius);
             m_targetRing->tint = vec4(1.0f, pulse, 0.05f, 1.0f); // orange-yellow pulse
         }
     }
@@ -543,18 +559,11 @@ void Game::Update(float dt, const InputState& input)
         sprite->spriteUVRect = sprite->animFrames[frameIndex];
     }
 
-    // Bulk sprite hover + frame animation
-    for (size_t i = 0; i < m_bulkSpriteActors.size(); ++i)
+    // Bulk sprite frame animation (hover Y is now computed per-vertex on GPU)
+    for (Entity* sprite : m_bulkSpriteActors)
     {
-        Entity* sprite = m_bulkSpriteActors[i];
         if (!sprite || sprite->animFrames.empty())
             continue;
-
-        const float phase = static_cast<float>(i) * 0.13f;
-        sprite->transform.SetPosition(
-            sprite->transform.position.x,
-            -0.15f + sinf(t * 1.45f + phase) * 0.10f,
-            sprite->transform.position.z);
 
         sprite->animTimer += dt;
         const int frameIndex = static_cast<int>(sprite->animTimer * sprite->animSpeed)
@@ -573,8 +582,8 @@ void Game::Update(float dt, const InputState& input)
         const int count = 3 + static_cast<int>(MRng() * 3.0f); // 3–5
         for (int i = 0; i < count; ++i)
         {
-            const float dx   = (MRng() - 0.5f) * 5.0f; // scatter ±2.5 around click point
-            const float dz   = (MRng() - 0.5f) * 5.0f;
+            const float dx   = (MRng() - 0.5f) * kTargetRadius * 2.0f;
+            const float dz   = (MRng() - 0.5f) * kTargetRadius * 2.0f;
             const float size = 0.55f + MRng() * 0.55f;
 
             Entity& meteor = m_scene.CreateEntity();

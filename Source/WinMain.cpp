@@ -119,12 +119,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         input.cinematicToggled = spaceDown && !spaceKeyWasDown;
         spaceKeyWasDown        = spaceDown;
 
-        const bool rightDown  = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
-        const bool leftDown   = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-        input.rightMouseHeld  = rightDown;
-        input.leftMouseClick  = leftDown && !leftMouseWasDown;
-        rightMouseWasDown     = rightDown;
-        leftMouseWasDown      = leftDown;
+        const bool rightDown    = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+        const bool middleDown   = (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
+        const bool leftDown     = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        input.rightMouseHeld    = rightDown;
+        input.middleMouseHeld   = middleDown;
+        input.leftMouseClick    = leftDown && !leftMouseWasDown;
+        if ( rightDown && !rightMouseWasDown) window.ConfineCursor(true);
+        if (!rightDown &&  rightMouseWasDown) window.ConfineCursor(false);
+        rightMouseWasDown       = rightDown;
+        leftMouseWasDown        = leftDown;
 
         POINT cursorPt;
         GetCursorPos(&cursorPt);

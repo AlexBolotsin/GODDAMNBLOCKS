@@ -118,6 +118,10 @@ float4 PSMain(PSInput input) : SV_TARGET
         return float4(saturate(finalSpriteColor), spriteAlpha * input.color.a);
     }
 
+    // Unlit path — gizmos and other emissive geometry skip lighting entirely
+    if (renderParams.z > 0.5f)
+        return float4(input.color.rgb, tintColor.a);
+
     float3 normalWS = normalize(input.normalWS);
 
     float floorMask = saturate(1.0f - abs(input.worldPos.y + 1.0f) * 4.0f);

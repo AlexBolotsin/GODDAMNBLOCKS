@@ -24,9 +24,13 @@ public:
     std::vector<SceneParticle>&       GetParticles()       { return m_particles; }
     const std::vector<SceneParticle>& GetParticles() const { return m_particles; }
 
+    float GetTime() const  { return m_time; }
+    void  SetTime(float t) { m_time = t; }
+
     void Clear();
 
 private:
     std::vector<std::unique_ptr<Entity>> m_entities;
     std::vector<SceneParticle>           m_particles;
+    float                                m_time = 0.0f;
 };

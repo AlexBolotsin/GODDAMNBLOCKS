@@ -988,14 +988,15 @@ cbuffer PerFrame : register(b0)
     row_major float4x4 projMatrix;
     row_major float4x4 lightViewProjMatrix;
     float3 cameraEyeWS;
-    float  _pad;
+    float  time;
 };
 
 struct SpriteInstance
 {
     row_major float4x4 world;
     float4             uvRect;
-    float4             tint;   // rgb = per-sprite colour tint
+    float4             tint;      // rgb = per-sprite colour tint
+    float4             hoverData; // x = per-sprite phase for GPU hover animation
 };
 StructuredBuffer<SpriteInstance> g_instances : register(t0);
 
@@ -1028,6 +1029,7 @@ VSOut VSMain(uint vid : SV_VertexID, uint iid : SV_InstanceID)
 {
     SpriteInstance inst = g_instances[iid];
     float4 wp  = mul(float4(kPos[vid], 1.0f), inst.world);
+    wp.y      += sin(time * 1.45f + inst.hoverData.x) * 0.10f;
     float4 vp  = mul(wp, viewMatrix);
     VSOut o;
     o.pos      = mul(vp, projMatrix);
@@ -1188,7 +1190,7 @@ float4 PSMain(VSOut i) : SV_TARGET
     psoDesc.InputLayout           = { nullptr, 0 };  // procedural vertices via SV_VertexID
     psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     psoDesc.NumRenderTargets      = 1;
-    psoDesc.RTVFormats[0]         = DXGI_FORMAT_R8G8B8A8_UNORM;
+    psoDesc.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
     psoDesc.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
     psoDesc.SampleDesc.Count      = m_msaaSampleCount;
     psoDesc.SampleDesc.Quality    = 0;
@@ -1196,10 +1198,10 @@ float4 PSMain(VSOut i) : SV_TARGET
     if (FAILED(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_instancedSpritePso))))
         return false;
 
-    // Upload buffer: FrameCount regions × kMaxSpriteInstances × 96 bytes per instance
-    // (64 bytes mat4 world + 16 bytes vec4 uvRect + 16 bytes vec4 tint)
+    // Upload buffer: FrameCount regions × kMaxSpriteInstances × 112 bytes per instance
+    // (64 bytes mat4 world + 16 bytes vec4 uvRect + 16 bytes vec4 tint + 16 bytes vec4 hoverData)
     {
-        const UINT64 bufferSize = static_cast<UINT64>(FrameCount) * kMaxSpriteInstances * 96ull;
+        const UINT64 bufferSize = static_cast<UINT64>(FrameCount) * kMaxSpriteInstances * 112ull;
         D3D12_HEAP_PROPERTIES hp = {};
         hp.Type = D3D12_HEAP_TYPE_UPLOAD;
         D3D12_RESOURCE_DESC rd = {};
@@ -1941,18 +1943,18 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
         frameData.lightViewProjMatrix = m_lightViewProj;
 
         // Write per-frame data into the current frame's slot of the upload CB
-        struct PerFrameCbData { mat4 view; mat4 proj; mat4 lightVP; vec3 cameraEye; float pad; };
+        struct PerFrameCbData { mat4 view; mat4 proj; mat4 lightVP; vec3 cameraEye; float time; };
         PerFrameCbData cbData;
         cbData.view      = frameData.viewMatrix;
         cbData.proj      = frameData.projMatrix;
         cbData.lightVP   = frameData.lightViewProjMatrix;
         cbData.cameraEye = camera.eye;
-        cbData.pad       = 0.0f;
+        cbData.time      = scene->GetTime();
         memcpy(m_perFrameCbMapped + 256 * m_frameIndex, &cbData, sizeof(cbData));
         frameData.perFrameGpuAddr = m_perFrameCb->GetGPUVirtualAddress() + 256 * m_frameIndex;
 
-        // Per-instance data layout must match the HLSL SpriteInstance struct (96 bytes)
-        struct SpriteInstanceData { mat4 world; vec4 uvRect; vec4 tint; };
+        // Per-instance data layout must match the HLSL SpriteInstance struct (112 bytes)
+        struct SpriteInstanceData { mat4 world; vec4 uvRect; vec4 tint; vec4 hoverData; };
 
         SpriteInstanceData* instanceDst = reinterpret_cast<SpriteInstanceData*>(m_spriteInstanceMapped)
                                           + m_frameIndex * kMaxSpriteInstances;
@@ -2006,10 +2008,11 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
         for (uint32_t i = 0; i < instanceCount; ++i)
         {
             const Entity* e = m_instanceSortBuf[i].second;
-            instanceDst[i].world  = MatrixBillboard(
+            instanceDst[i].world     = MatrixBillboard(
                 e->transform.position, e->transform.scale, camera.eye);
-            instanceDst[i].uvRect = e->spriteUVRect;
-            instanceDst[i].tint   = e->tint;
+            instanceDst[i].uvRect    = e->spriteUVRect;
+            instanceDst[i].tint      = e->tint;
+            instanceDst[i].hoverData = vec4(e->hoverPhase, 0.0f, 0.0f, 0.0f);
         }
 
         // Single instanced draw replaces the 5000 individual draws
@@ -2026,7 +2029,7 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
             // Param 1: root SRV pointing to this frame's region of the instance buffer
             const D3D12_GPU_VIRTUAL_ADDRESS instAddr =
                 m_spriteInstanceBuffer->GetGPUVirtualAddress()
-                + static_cast<UINT64>(m_frameIndex) * kMaxSpriteInstances * 96ull;
+                + static_cast<UINT64>(m_frameIndex) * kMaxSpriteInstances * 112ull;
             m_commandList->SetGraphicsRootShaderResourceView(1, instAddr);
 
             // Param 2: descriptor table — heap slot 0 (sprite atlas) → shader register t1

@@ -7,15 +7,67 @@ WinMain.cpp
   │
   ├─► GrmWindowWrapper   — OS window, message pump, cursor, scroll
   ├─► DX12Context        — GPU device, all pipelines, all render passes
-  └─► Game               — scene content, game logic, camera
-        └─► Scene        — entity list, particle list, elapsed time
-              └─► Entity — transform, mesh, material, flags, tint
+  └─► Game               — world content, game logic, camera
+        └─► World        — EntityID allocator + typed component pools
+              ├─ ComponentPool<TransformComp>   (position / rotation / scale)
+              ├─ ComponentPool<RenderComp>      (mesh, material, tint, flags)
+              ├─ ComponentPool<SpriteComp>      (atlas UV, hover phase, animation)
+              ├─ ComponentPool<PhysicsComp>     (velocity — meteors, ragdoll)
+              ├─ ComponentPool<BurningComp>     (age, duration, original tint)
+              ├─ std::vector<SceneParticle>     (CPU-sim fire particles for GPU)
+              └─ std::vector<SceneShockwave>    (active explosion rings for distort pass)
 ```
 
 Every frame the loop runs:
 1. `GrmWindowWrapper` pumps OS messages and produces an `InputState`.
-2. `Game::Update` runs game logic and writes into `Scene`.
-3. `DX12Context::BeginFrame` → `RenderScene` → `EndFrame` reads from `Scene` and drives the GPU.
+2. `Game::Update` runs game logic and writes into `World`.
+3. `DX12Context::BeginFrame` → `RenderScene(world, camera)` → `EndFrame` reads from `World` and drives the GPU.
+
+---
+
+## ECS Core (`Source/ECS.h`, `Source/Components.h`)
+
+### EntityID
+
+```cpp
+using EntityID = uint32_t;
+static constexpr EntityID kNullEntity = 0;
+```
+
+An entity is just a number. There is no `Entity` class. All data lives in component pools.
+
+### ComponentPool\<T\>
+
+A sparse-set backed by two parallel dense arrays:
+
+```cpp
+template<typename T>
+class ComponentPool {
+    std::unordered_map<EntityID, uint32_t> m_index; // O(1) lookup
+    std::vector<EntityID>                  m_ids;   // dense — for iteration
+    std::vector<T>                         m_data;  // dense — cache-friendly
+};
+```
+
+| Operation | Cost |
+|---|---|
+| `Has(id)` | O(1) |
+| `Get(id)` | O(1) |
+| `Add(id, comp)` | O(1) amortized |
+| `Remove(id)` | O(1) — swap-with-last |
+| Iteration (`Size()`, `IdAt(i)`, `DataAt(i)`) | O(N), cache-friendly |
+
+`Remove` swaps the target entry with the last entry and pops, keeping the arrays dense.
+
+### Component structs (`Source/Components.h`)
+
+| Struct | Fields | Who uses it |
+|---|---|---|
+| `TransformComp` | `Transform transform` | Every positioned entity |
+| `RenderComp` | `mesh, material, tint, visible, isBillboard, isInstanced, …` | Every drawn entity |
+| `SpriteComp` | `uvRect, hoverPhase, animFrames, animSpeed, animTimer` | Billboard sprites only |
+| `PhysicsComp` | `velocity` | Meteors + burning ragdoll |
+| `BurningComp` | `age, duration, origTint` | Sprites hit by explosion scorch zone |
 
 ---
 
@@ -57,99 +109,87 @@ Owns every GPU resource and drives the frame lifecycle. Key responsibilities:
 - `CreateShadowSpritePipeline` — depth-only PSO for hero billboard sprites.
 - `CreateInstancedSpritePipeline` — GPU-instanced billboards with per-instance data SRV.
 - `CreateParticlePipeline` — additive billboard particles, depth-test on, depth-write off.
-- `CreatePostProcessResources` — HDR target + two half-res bloom targets + RTV/SRV heaps.
+- `CreatePostProcessResources` — HDR target + two half-res bloom targets + full-res distort target + RTV/SRV heaps.
 - `CreatePostProcessPipelines` — bright-pass, blur-H, blur-V, tonemap PSOs.
+- `CreateDistortPipeline` — shockwave air-distortion PSO + double-buffered shockwave CB.
 
 **Frame lifecycle:**
 ```
 BeginFrame()
   reset allocator/list
-  barrier: back-buffer PRESENT → RENDER_TARGET (for resolve later)
 
-RenderScene(scene, camera)
-  [Shadow pass]         — depth-only to shadow map
+RenderScene(world, camera)
+  [Shadow pass]         — depth-only to shadow map; iterates world->renders
   [MSAA main pass]      — geometry + instanced sprites + particles → MSAA color target
+    ↳ pre-fill shockwave CB here (camera data available)
   [MSAA resolve]        — MSAA target → HDR target (R16G16B16A16_FLOAT)
+
+EndFrame()
   [Bloom bright-pass]   — HDR → half-res bright pixels
   [Bloom blur-H]        — bright → bloomA
   [Bloom blur-V]        — bloomA → bloomB
-  [Tonemap composite]   — HDR + bloomB → back-buffer; applies scanlines/dither
-
-EndFrame()
-  barrier: back-buffer RENDER_TARGET → PRESENT
-  close list, execute, present, MoveToNextFrame (fence sync)
+  [Distort pass]        — HDR → distortTarget (world-space ring using pre-filled CB)
+  [Tonemap composite]   — distortTarget + bloomB → back-buffer; applies scanlines/dither
+  barrier → PRESENT, present, fence sync
 ```
 
 **Double buffering:**
-- `FrameCount = 2`. Each frame index has its own command allocator and fence value.
+- `FrameCount = 2`. Each frame index has its own command allocator, fence value, and shockwave CB slot.
 - `MoveToNextFrame` waits for the older frame's fence before reusing its allocator.
 
 ---
 
-### Scene  (`Source/Scene.*`)
-A flat container. No hierarchy, no spatial acceleration.
+### World  (`Source/World.*`)
+Owns all entities and their component pools. Replaces the old `Scene` class.
 
 ```cpp
-std::vector<std::unique_ptr<Entity>> m_entities;
-std::vector<SceneParticle>           m_particles;  // CPU-written each frame, uploaded to GPU
-float                                m_time;       // seconds since startup, for GPU hover sin()
+class World {
+public:
+    EntityID CreateEntity();       // returns next ID (starts at 1)
+    void     DestroyEntity(id);    // removes from every pool
+    void     Clear();              // wipes everything, resets IDs
+
+    ComponentPool<TransformComp> transforms;
+    ComponentPool<RenderComp>    renders;
+    ComponentPool<SpriteComp>    sprites;
+    ComponentPool<PhysicsComp>   physics;
+    ComponentPool<BurningComp>   burning;
+
+    std::vector<SceneParticle>   particles;  // CPU-written each frame, GPU-uploaded
+    std::vector<SceneShockwave>  shockwaves; // active rings for the distort pass
+    float                        time = 0.0f;
+};
 ```
 
-`SceneParticle` is 32 bytes: `float x,y,z,size,r,g,b,a`. The GPU particle buffer is a plain upload
-buffer that `RenderScene` copies into before the particle draw call.
+`Scene.h` is kept as a one-line alias (`using Scene = World`) for backward compatibility.
 
----
-
-### Entity  (`Source/Entity.*`)
-One renderable object. All fields are public — no setter overhead.
-
-| Field | Purpose |
-|---|---|
-| `transform` | Position, rotation, scale — builds the world matrix |
-| `mesh` | Shared vertex/index buffer |
-| `material` | Shared PSO, root signature, texture SRV |
-| `tint` | Per-entity RGBA multiplier |
-| `enabled` | Skipped in the render loop if false |
-| `isBillboardActor` | Cylindrical (Y-locked) billboard transform |
-| `usesSpriteTexture` | Enables texture sampling path in pixel shader |
-| `isBlobShadow` | Tells shadow pass to skip this entity |
-| `useInstancing` | Drawn via the instanced sprite PSO instead of per-entity |
-| `isUnlit` | Bypasses all lighting, fog, and shadow receive |
-| `isBurning` | Marks entity as claimed by the BurningSprite system |
-| `hoverPhase` | Per-entity random offset for GPU hover sin wave |
-| `spriteUVRect` | Atlas rectangle (u0,v0,u1,v1) passed to shader |
-| `velocity` | Used by Game for meteor physics |
-| `animFrames` / `animTimer` | Sprite sheet animation (CPU-side frame selection) |
-
-`Entity::Draw` uploads per-object root constants (world matrix, tint, renderParams) and emits a draw call. The shadow pass calls it with `worldOverride` (projected matrix) and `shadowPass=true`.
-
-`renderParams` packing:
-
-| Component | Shadow pass | Main pass |
-|---|---|---|
-| `.x` | `1.0` (shadow mode) | `1.0` if blob shadow entity |
-| `.y` | `1.0` if sprite texture | `1.0` if sprite texture |
-| `.z` | `0.0` | `1.0` if isUnlit |
-| `.w` | unused | unused |
+`SceneParticle` — 32 bytes: `float x,y,z,size,r,g,b,a`.  
+`SceneShockwave` — `float x,y,z,age,maxAge,maxRadius` — one entry per live explosion during its distortion window.
 
 ---
 
 ### Game  (`Source/Game.*`)
-All gameplay and scene-management logic. Runs entirely on the CPU; writes results into `Scene`.
+All gameplay and scene-management logic. Runs entirely on the CPU; writes results into `World`.
 
-**Subsystems inside Game:**
+**Entity tracking:** Game maintains `std::vector<EntityID>` lists for each logical group.
+Parallel-index lists (e.g. `m_spriteActors` / `m_blobActors`) are synced by position — index 0 of blobs belongs to index 0 of sprites.
+
+**Subsystems inside Game::Update:**
 
 | Subsystem | What it does |
 |---|---|
-| Camera orbit/pan/zoom | Spherical coordinates → eye position; right-mouse drag rotates, middle-mouse drag pans target, scroll zooms radius |
-| Cinematic mode | Sine-wave animated azimuth, elevation, radius — overrides manual input |
-| Targeting ring | Mouse ray cast to Y=-1 plane; scales a ring mesh entity to `kTargetRadius` |
-| Meteor spawning | Left-click fires 3–5 meteors, scattered around the target position; each is a sphere entity with downward velocity |
-| Explosion system | When a meteor hits Y=-1, sphere expands over time; sprites inside the scorch radius start burning |
-| Fire particle emission | Each burning sprite and each active meteor emits CPU-side `FireParticle` structs each frame |
-| Burning sprite system | `BurningSprite` lerps tint orange→dark-red, kills entity on burnout |
-| Scene particle write | All live `FireParticle` structs are converted to `SceneParticle` and written to `scene.GetParticles()` |
-| Bulk sprite instancing | 5 000 `Entity` objects with `useInstancing=true`; only animation frame is updated per-frame (Y-hover runs on GPU) |
+| Camera orbit/pan/zoom | Spherical coordinates → eye position |
+| Cinematic mode | Sine-wave animated azimuth, elevation, radius |
+| Targeting ring | Mouse ray cast to Y=-1 plane; updates `m_targetRing` transform and tint |
+| Meteor spawning | Left-click adds entities with `PhysicsComp`, `RenderComp` |
+| Meteor physics | `PhysicsComp` velocity applied per-frame, gravity accumulated |
+| Explosion system | On impact: sphere entity expands; nearby sprites get `BurningComp` + `PhysicsComp` |
+| Burning system | Iterates `world.burning` pool directly; shifts tint, applies ragdoll physics, emits particles |
+| Fire particle emission | `FireParticle` CPU structs → `world.particles` for GPU upload |
+| Shockwave data | Fills `world.shockwaves` from live explosions for the distort pass |
+| Bulk sprite animation | Iterates `world.sprites` for atlas frame selection each frame |
+
+**Systems are free functions / inline loops** — there is no system class. Each subsystem is a block inside `Game::Update`.
 
 **LCG random number generators:**
 - `m_meteorRng` — seeded `0xCAFEBABE`, used for meteor scatter and count.
@@ -165,31 +205,34 @@ Header-only: `vec2`, `vec3`, `vec4`, `mat4`, all operator overloads, and:
 - `MatrixRotationY/X/Z`, `MatrixScale`, `MatrixTranslation`.
 
 **Row-major layout (important for shader uploads):**  
-`mat4.m[row*4 + col]`. Column vectors of the view matrix (right, up, back) live in rows, not columns:
+`mat4.m[row*4 + col]`. The view matrix stores camera basis vectors in its columns:
+
 ```
 m[0]=xAxis.x  m[1]=yAxis.x  m[2]=zAxis.x  m[3]=0
 m[4]=xAxis.y  m[5]=yAxis.y  m[6]=zAxis.y  m[7]=0
+m[8]=xAxis.z  m[9]=yAxis.z  m[10]=zAxis.z m[11]=0
 ...
 ```
-When extracting camera basis in `Game.cpp` for ray casting:
+
+So to extract camera basis (used in Game.cpp ray casting and in the shockwave CB fill):
 ```cpp
-camRight = { viewMat.m[0], viewMat.m[4], viewMat.m[8]  };
-camUp    = { viewMat.m[1], viewMat.m[5], viewMat.m[9]  };
-camBack  = { viewMat.m[2], viewMat.m[6], viewMat.m[10] };
+cameraRight = { vm[0], vm[4], vm[8]  };  // view col 0 = xAxis
+cameraUp    = { vm[1], vm[5], vm[9]  };  // view col 1 = yAxis
+cameraBack  = { vm[2], vm[6], vm[10] };  // view col 2 = zAxis (normalize(eye-target))
 ```
 
 ---
 
 ### Mesh  (`Source/Mesh.*`)
 Creates vertex and index buffers as committed D3D12 resources. Exposes `Draw(commandList)`.
-Vertex layout: `float3 Position, float3 Normal, float2 UV`.
+Vertex layout: `float3 Position, float3 Normal, float4 Color, float2 UV`.
 
 Built-in mesh factories (anonymous namespace in `Game.cpp`):
-- `CreateBoxMesh` — unit cube.
-- `CreateGroundMesh` — large flat quad.
-- `CreateSpriteMesh` — unit billboard quad.
-- `CreateBlobMesh` — flat oval for blob shadows.
-- `CreateSphereMesh` — UV sphere for explosions.
+- `CreateCubeMesh` — unit cube.
+- `CreateGroundPlaneMesh` — large flat quad.
+- `CreateSpriteQuadMesh` — unit billboard quad.
+- `CreateBlobShadowMesh` — flat oval for blob shadows.
+- `CreateSphereMesh` — UV sphere for explosions and meteors.
 - `CreateTargetRingMesh` — 48-segment flat ring (inner=0.82, outer=1.0) for the targeting gizmo.
 
 ---
@@ -204,6 +247,7 @@ Compiled at runtime with `D3DCompile` so you can edit and relaunch without rebui
 ## Why This Design is Good for Learning
 
 - **Flat, explicit** — no engine abstractions hiding GPU calls. Every barrier, every bind, every upload is visible.
-- **One file per concern** — follow one system at a time without hunting across an abstraction stack.
-- **CPU-readable frame graph** — the entire render order lives in `DX12Context::RenderScene`, top to bottom.
+- **ECS is minimal and readable** — `ComponentPool<T>` is ~70 lines. There are no macros, no type-erasure, no reflection.
+- **Systems are plain loops** — iterate `world->renders.Size()` and call `world->transforms.Get(id)`. No framework required.
+- **CPU-readable frame graph** — the entire render order lives in `DX12Context::RenderScene` + `EndFrame`, top to bottom.
 - **Game logic separated from rendering** — `Game.cpp` is pure C++ math/logic; `DX12Context.cpp` is pure GPU.

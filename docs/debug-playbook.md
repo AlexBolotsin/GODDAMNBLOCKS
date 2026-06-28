@@ -69,7 +69,7 @@ confirm `m_hdrTarget` and bloom targets are all `R16G16B16A16_FLOAT`.
 
 ### Particles not visible
 
-- Confirm `scene.GetParticles()` is non-empty before the draw (put a breakpoint in `RenderScene`).
+- Confirm `world->particles` is non-empty before the draw (put a breakpoint in `RenderScene`).
 - Confirm `memcpy` size: `pCount * 32` bytes (32 bytes per `SceneParticle`).
 - Confirm the particle PSO blend state: `DestBlend = ONE`. If it's `ZERO`, particles overwrite
   the scene instead of adding to it.
@@ -100,13 +100,24 @@ confirm `m_hdrTarget` and bloom targets are all `R16G16B16A16_FLOAT`.
   `m_camera.target = vec3(0,0,-5)` reset was removed from `Game::Update` (it was removed in a
   prior session to enable the pan feature).
 
+### Shockwave distortion not visible / always circular
+
+- Confirm the distort pass runs after bloom-V and before tonemap in `EndFrame`.
+- Confirm the tonemap SRV table points at `distortTarget` (heap slot 3), not `m_hdrTarget` (slot 0).
+- If the ring is circular regardless of camera angle: the old screen-space code is still active.
+  The current shader must use ray-plane intersection (`rayDir.y < -0.001f` guard).
+- If the ring is in the wrong position: confirm `cameraBack = (vm[2], vm[6], vm[10])` — the third
+  column of the view matrix, not the third row.
+- If the ring is present but appears sky-side instead of ground-side: `rayDir.y` sign is inverted —
+  check the ndc Y flip (`1 - uv.y * 2`, not `uv.y * 2 - 1`).
+
 ### Performance: FPS drops when many meteors or particles are live
 
 - The particle system is CPU-side: `m_fireParticles` grows without bound unless particles are
   aged out. Confirm `particle.age >= particle.maxAge` triggers removal.
-- The burning sprite system checks `e->enabled` before pushing — but removed entities that stay
-  in `m_burningSprites` with `entity=nullptr` will crash. Confirm the entity pointer is cleared
-  or the BurningSprite is removed when the entity is disabled.
+- The burning system iterates `world.burning` pool directly. If the pool grows unexpectedly,
+  confirm `world.burning.Remove(id)` is called at burnout and `world.physics.Remove(id)` follows.
+  Leaking `BurningComp` entries keeps burning logic running on invisible entities.
 
 ---
 
@@ -114,7 +125,7 @@ confirm `m_hdrTarget` and bloom targets are all `R16G16B16A16_FLOAT`.
 
 1. **Change one thing at a time.** If a fix involves touching two systems, make the change in one and verify before touching the second.
 2. **Use the debug camera.** Disable cinematic mode (Space) so the camera is stationary during a debugging session.
-3. **Bisect with `entity->enabled = false`.** Disable entity groups one at a time to isolate which system produces a visual artifact.
+3. **Bisect by pool.** Set `rnd.visible = false` on a whole group by iterating a tracking list (`m_cubeActors`, etc.) to isolate which system produces a visual artifact.
 4. **Validate CPU data before GPU upload.** If particles look wrong, print the first few `SceneParticle` values before the `memcpy`. GPU corruption is rare; CPU logic errors are common.
 5. **Check barriers first on GPU validation errors.** A `D3D12 ERROR: invalid state` almost always means a missing `ResourceBarrier` call.
 6. **Keep notes.** Write what you changed, what happened, and what you tried in `STUDY_GUIDE_PROGRESS.md`. Short-loop debugging without notes leads to re-trying the same things.

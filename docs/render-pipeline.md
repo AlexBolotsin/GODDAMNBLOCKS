@@ -10,9 +10,10 @@ Every frame executes the passes below in strict order. All GPU work goes through
 **Code:** `DX12Context::BeginFrame`
 
 1. Reset the current frame's command allocator and the command list.
-2. Barrier: back buffer `PRESENT` → `RENDER_TARGET` (needed for the tonemap composite at the end).
+2. Set the MSAA render target, clear color and depth.
+3. Set viewport and scissor rect.
 
-Nothing is drawn here. This just opens the command list and makes the back buffer writable.
+Nothing is drawn here. This just opens the command list and prepares the MSAA target.
 
 ---
 
@@ -27,9 +28,8 @@ Nothing is drawn here. This just opens the command list and makes the back buffe
 2. Set shadow DSV, clear depth to 1.0.
 3. Set viewport and scissor to `kShadowMapSize × kShadowMapSize`.
 4. Build light view-projection matrix (`m_lightViewProj`) from a directional light position above and to the side.
-5. For each entity: draw with `m_shadowPso` (depth-only, no pixel shader output).
-6. For each instanced sprite batch: draw with `m_shadowSpritePso`.
-7. Barrier: shadow map `DEPTH_WRITE` → `PIXEL_SHADER_RESOURCE` (ready for main pass sampling).
+5. Iterate `world->renders` pool: for each entity with `castsProjectedShadow=true`, draw with `m_shadowPso` (depth-only geometry) or `m_shadowSpritePso` (depth-only billboard).
+6. Barrier: shadow map `DEPTH_WRITE` → `PIXEL_SHADER_RESOURCE` (ready for main pass sampling).
 
 **Why a separate shadow map instead of projected shadows?**  
 Projected shadows only work for flat ground planes and can't self-shadow. A real shadow map lets any
@@ -48,52 +48,57 @@ Hard geometry edges without anti-aliasing look jagged, especially on moving spri
 resolves subpixel coverage by running the pixel shader once per pixel but testing coverage at 8
 sub-pixel sample points.
 
-**Sub-pass 2a — Geometry (hero entities)**
+**Sub-pass 2a — Geometry + non-instanced sprites**
 
-Uses `Material.hlsl` (PSO from `Material::CreatePipeline`).
-
-For each non-instanced, non-blob-shadow entity with a mesh and material:
-1. Set PSO and root signature.
-2. Upload per-frame constants (view, proj, camera eye, light view-proj, shadow map SRV, time).
-3. Upload per-object constants (world matrix, tint, renderParams).
-4. Bind the material's SRV heap (sprite texture at t1, shadow map at t2).
+Iterates `world->renders` pool. For each entity with `isInstanced=false`:
+1. Set PSO and root signature from the entity's `RenderComp::material`.
+2. Bind SRV heap, set per-frame CB at b0.
+3. Upload `PerObjectData` (world matrix, tint, renderParams, spriteUVRect) as root constants at b1.
+4. For billboards (`isBillboard=true`): world matrix is `MatrixBillboard(pos, scale, cameraEye)`.
 5. `mesh->Draw(commandList)`.
+
+`renderParams` packing:
+
+| Component | Value |
+|---|---|
+| `.x` | `1.0` if blob shadow entity |
+| `.y` | `1.0` if `usesSpriteTexture` |
+| `.z` | `1.0` if `isUnlit` |
+| `.w` | unused |
 
 **Sub-pass 2b — Instanced Sprites**
 
 Uses the instanced sprite PSO (`m_instancedSpritePso`).
 
-1. Sort all `useInstancing` entities by camera distance (back-to-front for correct alpha).
-2. Fill the mapped upload buffer with `SpriteInstanceData` per entity:
+1. Frustum-cull all entities with `isInstanced=true` using extracted VP planes.
+2. Sort surviving entities by camera distance (front-to-back for early-Z).
+3. Fill the mapped upload buffer with `SpriteInstanceData` per entity:
    - `float4x4 worldMatrix` — billboard transform
-   - `float4 uvRect` — atlas region
-   - `float4 tint`
-   - `float4 hoverData` — `.x` = `hoverPhase` (per-entity random, used in vertex shader)
-3. Upload per-frame constants (same CB as geometry pass).
-4. Set root SRV to the instance buffer for this frame (double-buffered by frame index).
-5. `DrawInstanced(6, instanceCount, 0, 0)` — 6 vertices (2 triangles), no index buffer, instance ID selects the data row.
+   - `float4 uvRect` — atlas region from `SpriteComp::uvRect`
+   - `float4 tint` — from `RenderComp::tint`
+   - `float4 hoverData` — `.x` = `SpriteComp::hoverPhase`
+4. `DrawInstanced(6, instanceCount, 0, 0)` — 6 vertices (2 triangles), no index buffer.
 
 Vertex shader computes hover in GPU:  
-`worldPos.y += sin(time * 1.45 + inst.hoverData.x) * 0.10`  
-This replaces the old CPU loop that called `SetPosition` on 5 000 entities per frame.
+`worldPos.y += sin(time * 1.45 + inst.hoverData.x) * 0.10`
 
 **Sub-pass 2c — Additive Particles**
 
-Uses the particle PSO (`m_particlePso`).
-
-`Game::Update` writes `SceneParticle` structs into `scene.GetParticles()`. Each struct is 32 bytes:
+`Game::Update` writes `SceneParticle` structs into `world->particles`. Each struct is 32 bytes:
 `float x, y, z, size, r, g, b, a`.
 
-1. `memcpy` particle data into the current frame's slot in `m_particleBuffer` (double-buffered upload buffer, `FrameCount × 8000 × 32` bytes).
-2. Set PSO and root signature.
-3. Set per-frame CB at b0.
-4. Set particle buffer as root SRV at t0.
-5. `DrawInstanced(6, particleCount, 0, 0)`.
+1. `memcpy` particle data into the current frame's slot in `m_particleBuffer`.
+2. `DrawInstanced(6, particleCount, 0, 0)`.
 
-Vertex shader expands each particle into a camera-facing billboard quad using the camera right/up vectors extracted from the view matrix. Pixel shader computes a soft circle and blends hot-center (bright white/yellow) with cooler edge (orange/red).
+Blend state: additive (`DestBlend = ONE`). Depth test ON, depth write OFF.
 
-Blend state: `SrcBlend = SRC_ALPHA, DestBlend = ONE` — additive. Depth test ON, depth write OFF
-(particles occlude behind geometry but don't occlude each other).
+**Shockwave CB pre-fill (end of main pass block)**
+
+While `frameData.viewMatrix`, `frameData.projMatrix`, and `camera.eye` are in scope, the shockwave
+constant buffer for the distort pass (Pass 5) is filled here. It stores camera basis vectors
+(`cameraRight`, `cameraUp`, `cameraBack` from view matrix columns), projection parameters
+(`proj00`, `proj11`), ground Y, and per-wave world-space data from `world->shockwaves`.
+The actual draw happens later in `EndFrame`.
 
 ---
 
@@ -103,71 +108,92 @@ Blend state: `SrcBlend = SRC_ALPHA, DestBlend = ONE` — additive. Depth test ON
 
 1. Barrier: MSAA target `RENDER_TARGET` → `RESOLVE_SOURCE`.
 2. Barrier: HDR target `PIXEL_SHADER_RESOURCE` → `RESOLVE_DEST`.
-3. `ResolveSubresource(m_hdrTarget, m_msaaColorTarget, DXGI_FORMAT_R16G16B16A16_FLOAT)` — averages the 8 MSAA samples per pixel into a single HDR pixel.
-4. Barrier: MSAA target `RESOLVE_SOURCE` → `RENDER_TARGET` (reset for next frame).
-5. Barrier: HDR target `RESOLVE_DEST` → `PIXEL_SHADER_RESOURCE` (ready for bloom).
+3. `ResolveSubresource(m_hdrTarget, m_msaaColorTarget, DXGI_FORMAT_R16G16B16A16_FLOAT)`.
+4. Barrier: MSAA target `RESOLVE_SOURCE` → `RENDER_TARGET`.
+5. Barrier: HDR target `RESOLVE_DEST` → `PIXEL_SHADER_RESOURCE`.
 
-The MSAA color target uses `R32_TYPELESS` so it can be interpreted as both `R16G16B16A16_FLOAT`
-(for rendering) and passed to `ResolveSubresource`. The resolved HDR target is a plain
-`R16G16B16A16_FLOAT` resource.
+Restores shadow map to `DEPTH_WRITE` at end of `RenderScene` for next frame.
 
 ---
 
 ## Pass 4 — Bloom Bright Pass
 
-**Code:** `DX12Context::RenderScene` — post-process section  
+**Code:** `DX12Context::EndFrame`  
 **Input:** HDR target (SRV)  
 **Output:** `m_bloomA` — half-resolution R16G16B16A16_FLOAT
 
-A fullscreen triangle shader extracts pixels brighter than a threshold (luminance > ~1.0 in HDR
-space) and writes them at half resolution. Pixels below threshold write black.
-
-This is the input to the blur passes. By working at half resolution the blur is 4× cheaper.
+Fullscreen triangle shader: extracts pixels brighter than luminance ~1.0, writes black otherwise.
+Working at half resolution makes the blur 4× cheaper.
 
 ---
 
 ## Pass 5 — Bloom Blur H and Blur V
 
-**Code:** two sequential fullscreen passes  
 **Input/Output:** `m_bloomA` ↔ `m_bloomB`
 
-A separable 9-tap Gaussian blur kernel. Running horizontal then vertical gives a 2D Gaussian in
-two cheap 1D passes (9+9 samples instead of 81).
-
-Blur H: `m_bloomA` (SRV) → `m_bloomB` (RTV)  
-Blur V: `m_bloomB` (SRV) → `m_bloomA` (RTV)
-
-Result: `m_bloomA` holds the blurred bloom contribution.
+Separable 9-tap Gaussian blur (horizontal then vertical). Result: `m_bloomA` holds the blurred bloom.
 
 ---
 
-## Pass 6 — Tonemap + Composite → Back Buffer
+## Pass 6 — Shockwave Air Distortion
 
-**Code:** `DX12Context::RenderScene` — tonemap section  
-**Input:** HDR target + bloom (`m_bloomA`)  
-**Output:** Back buffer (LDR, sRGB)
+**Code:** `DX12Context::EndFrame` — distort section  
+**Input:** `m_hdrTarget` (SRV at t0)  
+**Output:** `m_distortTarget` — full-resolution R16G16B16A16_FLOAT  
+**CB:** `m_shockwaveCb[frameIndex]` — filled in `RenderScene` (Pass 2)
 
-The tonemap PSO runs a fullscreen triangle that:
-1. Samples the HDR scene color.
-2. Adds the bloom contribution (scaled by a bloom strength constant).
-3. Applies ACES filmic tone mapping to compress HDR to [0,1].
-4. Optionally applies scanline darkening (every other row at ~15% strength) — toggled with `C`.
-5. Optionally applies Bayer 4×4 ordered dithering to 8 levels per channel — toggled with `V`.
+**What happens:**
+1. Barrier: `m_distortTarget` `PIXEL_SHADER_RESOURCE` → `RENDER_TARGET`.
+2. Bind distort PSO (`m_distortPso`) and root signature.
+3. Set shockwave CB at b0 (root CBV), set HDR SRV at t0 (descriptor table).
+4. `DrawInstanced(3, 1, 0, 0)` — one fullscreen triangle.
+5. Barrier: `m_distortTarget` `RENDER_TARGET` → `PIXEL_SHADER_RESOURCE`.
 
-Scanlines and dithering are passed as float flags in the post-process constant buffer alongside FPS,
-frame time, entity count, and draw call count (displayed in the HUD overlay).
+**Why not screen-space UV rings?**  
+A ring computed purely in UV space is always a perfect circle on screen regardless of camera angle.
+A real shockwave on the ground should look like an ellipse when viewed obliquely — the foreshortening
+of the ground plane must be respected.
+
+**How the shader produces a ground-aligned ring:**
+
+For each fragment:
+1. Convert UV to NDC and build a world-space view ray:
+   ```hlsl
+   float3 rayDir = normalize(
+       cameraRight * (ndc.x / proj00) +
+       cameraUp    * (ndc.y / proj11) -
+       cameraBack
+   );
+   ```
+2. Early-out if `rayDir.y >= 0` (pixel is above the horizon — sky pixels cannot show the ring).
+3. Intersect with the ground plane: `t = (groundY - cameraEye.y) / rayDir.y`, `worldHit = eye + t*rayDir`.
+4. Measure world-space distance from `worldHit.xz` to the explosion center.
+5. Ring function: `ring = (1 - |dist - worldRadius| / kRingWidth)²` — smooth falloff on both sides.
+6. Project the outward world direction into screen UV space via the camera basis to get the UV offset direction.
+7. Accumulate `uvDir * ring * strength` across all active waves.
+8. Sample HDR at `uv + totalOffset`.
 
 ---
 
-## Pass 7 — EndFrame
+## Pass 7 — Tonemap + Composite → Back Buffer
 
-**Code:** `DX12Context::EndFrame`
+**Input:** `m_distortTarget` (t0) + `m_bloomA` (t1)  
+**Output:** Back buffer (LDR, R8G8B8A8_UNORM)
+
+1. Samples the distorted scene color (not raw HDR — distortion is baked in).
+2. Adds the bloom contribution.
+3. Applies ACES filmic tone mapping.
+4. Optionally applies scanline darkening (`C` key) and Bayer 4×4 dithering (`V` key).
+5. Outputs FPS/frame-time/entity/draw-call HUD via text quads.
+
+---
+
+## Pass 8 — EndFrame Sync
 
 1. Barrier: back buffer `RENDER_TARGET` → `PRESENT`.
-2. Close the command list.
-3. Execute on the command queue.
-4. `m_swapChain->Present(1, 0)` — present with vsync.
-5. `MoveToNextFrame` — signal fence for this frame, advance frame index, wait for the older frame's fence if it hasn't completed yet.
+2. Close and execute command list.
+3. `Present(1, 0)` — vsync.
+4. `MoveToNextFrame` — signal fence, advance frame index, wait for older frame if needed.
 
 ---
 
@@ -179,22 +205,23 @@ frame time, entity count, and draw call count (displayed in the HUD overlay).
 | MSAA color | RENDER_TARGET | RENDER_TARGET, RESOLVE_SOURCE | RENDER_TARGET |
 | Depth | DEPTH_WRITE | DEPTH_WRITE | DEPTH_WRITE |
 | Shadow map | PIXEL_SHADER_RESOURCE | DEPTH_WRITE → PSR | PIXEL_SHADER_RESOURCE |
-| HDR target | PIXEL_SHADER_RESOURCE | RESOLVE_DEST → PSR (bloom input) | PIXEL_SHADER_RESOURCE |
+| HDR target | PIXEL_SHADER_RESOURCE | RESOLVE_DEST → PSR (bloom + distort input) | PIXEL_SHADER_RESOURCE |
 | bloomA | PIXEL_SHADER_RESOURCE | RTV (bright) → RTV (blurV) → PSR | PIXEL_SHADER_RESOURCE |
 | bloomB | PIXEL_SHADER_RESOURCE | RTV (blurH) → PSR | PIXEL_SHADER_RESOURCE |
+| distortTarget | PIXEL_SHADER_RESOURCE | RTV (distort) → PSR (tonemap input) | PIXEL_SHADER_RESOURCE |
 
-Every transition is an explicit `D3D12_RESOURCE_BARRIER` of type `TRANSITION`. Missing a barrier
-causes the GPU validation layer to report an error, or silently corrupt output on release hardware.
+Every transition is an explicit `D3D12_RESOURCE_BARRIER` of type `TRANSITION`.
 
 ---
 
 ## Important GPU State Rules
 
 - **Depth test:** `LESS`, front face `CCW` (right-handed convention).
-- **MSAA:** All main-pass draw calls must target `m_msaaColorTarget`, not the back buffer directly.
+- **MSAA:** All main-pass draw calls must target `m_msaaColorTarget`, not the back buffer.
   The back buffer is only written by the tonemap pass.
 - **PSO format must match render target format:** The instanced sprite PSO uses `R16G16B16A16_FLOAT`
-  to match the MSAA target. A mismatch silently produces blank output on some GPUs and a D3D12
-  debug error on others.
+  to match the MSAA target.
 - **Particle depth-write off:** Particles use additive blend. With depth-write on, the first
-  particle would block all particles behind it. Depth-test stays on so particles hide behind walls.
+  particle would block all particles behind it.
+- **Tonemap reads distort, not raw HDR:** The distort pass sits between bloom and tonemap. The tonemap
+  SRV table points at `distortTarget` (slot 3 in the post SRV heap), not `m_hdrTarget` (slot 0).

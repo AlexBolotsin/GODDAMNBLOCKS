@@ -93,13 +93,13 @@ Once you exceed the budget, `CreateRootSignature` fails.
 - Double-buffered upload buffer for instance data (`FrameCount × 5000 × 112` bytes)
 - Root SRV bound to instance buffer (avoids descriptor heap slot for structured buffer)
 - `DrawInstanced(6, count, 0, 0)` — no vertex buffer; VS reads instance data by `SV_InstanceID`
-- 5 000 sprite entities with `useInstancing=true`
+- 5 000 sprite entities
 
 **Problems solved:**
 - PSO format mismatch: instanced sprite PSO had `RTVFormats[0] = R8G8B8A8_UNORM` but the MSAA
   target is `R16G16B16A16_FLOAT` — sprites rendered blank. Fixed by matching formats.
-- Stride constant 96→112 in three places: buffer allocation, per-frame slot offset, and root SRV
-  address. Missing any one of the three caused every sprite to read wrong data.
+- Stride constant in three places: buffer allocation, per-frame slot offset, and root SRV
+  address. Missing any one causes every sprite to read wrong data.
 
 **Key lesson:**  
 GPU instancing with a structured buffer SRV is simpler than an instanced vertex buffer when your
@@ -111,92 +111,68 @@ just `bufferGpuAddress + frameIndex * maxInstances * stride`.
 ## Stage 6 — GPU Hover Animation
 
 **What was built:**
-- `hoverPhase` float on `Entity` (per-entity random offset, assigned at spawn)
+- `hoverPhase` per entity (per-entity random offset, assigned at spawn)
 - `vec4 hoverData` in `SpriteInstanceData` (`.x` = phase)
-- `time` field added to `PerFrameCbData`, written from `Scene::GetTime()` each frame
+- `time` field added to `PerFrameCbData`, written from `world->time` each frame
 - Vertex shader: `wp.y += sin(time * 1.45 + inst.hoverData.x) * 0.10`
 
 **What was removed:**
-- Per-frame CPU loop calling `SetPosition(Y)` on 5 000 entities — this was 5 000 function calls
-  and matrix rebuilds per frame for a purely cosmetic effect
+- Per-frame CPU loop calling `SetPosition(Y)` on 5 000 entities
 
 **Key lesson:**  
 Any per-vertex or per-instance animation that depends only on time and a static per-instance value
-belongs on the GPU, not the CPU. Moving it to the vertex shader costs essentially nothing and frees
-the CPU entirely.
+belongs on the GPU, not the CPU.
 
 ---
 
 ## Stage 7 — Shadow Map
 
 **What was built:**
-- 2048×2048 `m_shadowMap` resource (R32_TYPELESS, used as D32_FLOAT for rendering and R32_FLOAT SRV)
+- 2048×2048 `m_shadowMap` resource (R32_TYPELESS, used as D32_FLOAT DSV and R32_FLOAT SRV)
 - Separate DSV heap for shadow map
 - `m_shadowPso` — depth-only geometry pass
 - `m_shadowSpriteRootSig` / `m_shadowSpritePso` — depth-only billboard pass
 - Light view-projection matrix built in `RenderScene`
-- Shadow map SRV bound at t2 in the geometry root signature
 - PCF sampling in `Material.hlsl`: `SampleCmpLevelZero` with `LESS_EQUAL` comparison sampler
-- Shadow coordinate projection in VS: `shadowCoord = mul(worldPos, lightViewProj)`
 
 **Why this replaced the old projected shadow system:**  
-Projected shadows only cast onto a flat plane. They cannot self-shadow, cannot cast onto walls, and
-the projection matrix must be recomputed per caster per frame. A shadow map costs one extra draw
-pass for the whole scene and then samples a single texture — far more general.
+Projected shadows only cast onto a flat plane. A shadow map costs one extra draw pass and then
+samples a single texture — far more general.
 
 ---
 
 ## Stage 8 — Targeting Ring and Click-to-Cast
 
 **What was built:**
-- `CreateTargetRingMesh` — 48-segment flat ring (inner=0.82, outer=1.0, Y=0 local)
+- `CreateTargetRingMesh` — 48-segment flat ring (inner=0.82, outer=1.0)
 - Mouse ray casting: unproject NDC through perspective frustum, intersect with Y=-1 ground plane
-- `m_targetRing` entity with `isUnlit=true` (ring doesn't receive shadow or lighting)
-- Left-click spawns 3–5 sphere-mesh meteors scattered within `kTargetRadius = 2.5` around the ring
-- Meteors have downward velocity, physics updated in `Game::Update`
+- Targeting ring entity with `isUnlit=true`
+- Left-click spawns 3–5 sphere-mesh meteors scattered within `kTargetRadius = 2.5`
 
 **Key lesson — view matrix basis extraction:**  
-`MatrixLookAtRH` stores camera axes (right, up, back) as column vectors spread across the rows of
-the 4×4 matrix. To extract them for ray casting:
+`MatrixLookAtRH` stores camera axes as column vectors across the rows of the matrix. To extract:
 ```cpp
-camRight = { view.m[0], view.m[4], view.m[8]  };  // xAxis
-camUp    = { view.m[1], view.m[5], view.m[9]  };  // yAxis
-camBack  = { view.m[2], view.m[6], view.m[10] };  // zAxis
+camRight = { view.m[0], view.m[4], view.m[8]  };
+camUp    = { view.m[1], view.m[5], view.m[9]  };
+camBack  = { view.m[2], view.m[6], view.m[10] };
 ```
-Then the view-space ray direction for a screen pixel at NDC `(vx, vy)` is:
-```cpp
-rayDir = normalize(camRight * vx + camUp * vy - camBack)
-```
+Then: `rayDir = normalize(camRight * vx + camUp * vy - camBack)`
 
 ---
 
 ## Stage 9 — VFX: Particle System and Burning Sprites
 
 **What was built:**
-
-*Particle pipeline:*
 - `m_particlePso` — additive billboard particles, procedural soft-circle PS
 - `SceneParticle` struct (32 bytes: position, size, RGBA)
-- Double-buffered GPU upload buffer (`FrameCount × 8000 × 32` bytes)
-- `scene.GetParticles()` — Game writes, DX12Context reads and uploads each frame
-
-*Game-side particle logic:*
-- `FireParticle` struct — CPU-side sim state (position, velocity, age, maxAge, startSize)
-- Each active meteor emits 3 trail particles per frame
-- Each burning sprite emits fire particles per frame
-- Particles apply gravity-decel upward drift, age out, write to `SceneParticle` list
-
-*Burning sprites:*
-- `BurningSprite` struct — entity pointer, age, duration, original tint
-- When an explosion reaches an entity within scorch radius, entity gets `isBurning=true`
-- Tint lerps from original → orange → dark red over `duration`
-- Entity is disabled at burnout
+- Double-buffered GPU upload buffer
+- `FireParticle` CPU-side sim state (position, velocity, age, lifetime, size)
+- Fire trail from meteors; fire particles from burning sprites
+- Burning sprite system: tint shifts from original → orange → dark red; entity disabled at burnout
 
 **Key lesson — additive blend particle depth:**  
-With additive blend (`DestBlend=ONE`), depth write must be OFF. If it is ON, particle A writes
-its depth value, and particle B behind A fails the depth test and is discarded, even though
-additive particles are meant to accumulate regardless of order. Depth test stays ON so particles
-correctly hide behind solid geometry.
+With additive blend (`DestBlend=ONE`), depth write must be OFF. If ON, the first particle written
+blocks all particles behind it. Depth test stays ON so particles correctly hide behind walls.
 
 ---
 
@@ -205,19 +181,14 @@ correctly hide behind solid geometry.
 **What was built:**
 - HDR intermediate target `m_hdrTarget` (R16G16B16A16_FLOAT)
 - MSAA resolve pass: MSAA → HDR
-- Half-resolution bloom targets `m_bloomA`, `m_bloomB`
-- Bright-pass PSO: extract pixels above luminance threshold
-- Blur-H and blur-V PSOs: separable 9-tap Gaussian
-- Tonemap PSO: sample HDR + bloom, apply ACES filmic curve, output to back buffer
-- Scanline toggle (`C` key): darkens every other row
-- Bayer dithering toggle (`V` key): 4×4 ordered dither quantizes to 8 levels per channel
-- FPS, frame time, entity count, draw call count passed to tonemap CB for HUD overlay
+- Half-resolution bloom: bright-pass → blur-H → blur-V
+- Tonemap PSO: ACES filmic curve
+- Scanline toggle (`C` key), Bayer dithering toggle (`V` key)
+- FPS / frame time / entity count / draw count HUD
 
 **Key lesson — HDR pipeline order:**  
-All scene rendering (geometry, sprites, particles) happens in HDR space (R16G16B16A16_FLOAT values
-can exceed 1.0). Additive particles can push pixel values well above 1.0 — this is intentional.
-The tonemap pass compresses the result to [0,1] at the very end. Never clamp to [0,1] during
-scene rendering; doing so loses the HDR information that bloom and tonemap need.
+All scene rendering happens in HDR space. Additive particles can push values above 1.0 — intentional.
+The tonemap pass compresses to [0,1] at the very end. Never clamp during scene rendering.
 
 ---
 
@@ -225,38 +196,87 @@ scene rendering; doing so loses the HDR information that bloom and tonemap need.
 
 **What was built:**
 - Middle-mouse drag: translate `m_camera.target` along camera-relative ground axes
-- Cursor confinement (`ClipCursor`) during right-mouse drag — cursor can't leave the window
-- Camera target persists between frames (removed the per-frame reset to `{0,0,-5}`)
-- `m_camera.target` initialized in `Game::Init` to `{0,0,-5}`
+- Cursor confinement (`ClipCursor`) during right-mouse drag
+- Camera target persists between frames
 
 **Key lesson:**  
-Camera pan direction must use azimuth-derived basis vectors, not world axes. If you pan along
-world X/Z, the pan direction changes relative to the view as the user orbits — it feels broken.
-Correct:
+Camera pan direction must use azimuth-derived basis vectors, not world axes:
 ```cpp
 camRight     = { -sin(azimuth), 0,  cos(azimuth) };
 camFwdGround = { -cos(azimuth), 0, -sin(azimuth) };
 ```
-These always move the target in the direction the camera is facing regardless of orbit angle.
 
 ---
 
-## Stage 12 — Fog Tuning and Unlit Flag
+## Stage 12 — Shockwave Air Distortion
 
 **What was built:**
-- Fog start pushed from ~5 to 20, fog end from ~30 to 65 — scene is much more visible
-- Geometry fog blend capped at `fogFactor × 0.7` — prevents geometry from washing out completely
-- `isUnlit` flag on Entity → `renderParams.z = 1.0` → early-out in PS before any lighting
-- Targeting ring uses `isUnlit=true` — always visible as a pure tint color, no fog or shadows
+- `m_distortTarget` — full-resolution R16G16B16A16_FLOAT render target
+- `m_distortRootSig` / `m_distortPso` — fullscreen distort PSO
+- Double-buffered shockwave CBs (`m_shockwaveCb[FrameCount]`)
+- Distort pass inserted between bloom-V and tonemap in `EndFrame`
+- Tonemap SRV updated to read `distortTarget` instead of raw HDR
+
+**First attempt (rejected):** Rings were computed in screen UV space — a perfect circle regardless
+of camera angle. Shockwaves at ground level looked like they were painted on the screen, not on the ground.
+
+**Second implementation (current):** Ray-plane intersection per fragment.
+- CB carries camera basis vectors (`cameraRight`, `cameraUp`, `cameraBack` from view matrix columns),
+  projection parameters (`proj00`, `proj11`), ground Y, and per-wave world-space data
+  (`worldX`, `worldZ`, `worldRadius` in metres, `uvStrength`).
+- CB is filled in `RenderScene` where `frameData` and `camera` are in scope.
+- Shader reconstructs a world-space view ray, intersects with `groundY = -1`,
+  measures ring distance in world metres, projects the outward direction back into UV space.
+- Sky pixels (`rayDir.y >= 0`) early-out with zero distortion.
+
+**Key lessons:**
+- Screen-space rings can only be circles. World-space rings naturally foreshorten into ellipses.
+- The CB fill must happen where both the camera and the scene data are in scope. In this engine that
+  is the end of `RenderScene`'s main pass block, even though the draw itself is in `EndFrame`.
+- Camera basis vectors come from the **columns** of the view matrix (because the engine uses
+  row-vector multiplication `v * M`): `cameraRight = (vm[0], vm[4], vm[8])`.
+- `proj00 = projMatrix.m[0]`, `proj11 = projMatrix.m[5]` — these are the diagonal entries of the
+  D3D12 RH perspective matrix, equal to `cot(fovY/2)/aspect` and `cot(fovY/2)` respectively.
+
+---
+
+## Stage 13 — ECS Migration
+
+**What was built:**
+- `Source/ECS.h` — `EntityID` (uint32_t) + `ComponentPool<T>` (sparse-set, ~70 lines)
+- `Source/Components.h` — `TransformComp`, `RenderComp`, `SpriteComp`, `PhysicsComp`, `BurningComp`
+- `Source/World.h` / `World.cpp` — `World` class with typed pool members, replaces `Scene`
+- `Entity.h` / `Entity.cpp` reduced to thin redirects (no `Entity` class, no `Entity::Draw`)
+- `Scene.h` / `Scene.cpp` reduced to `using Scene = World` alias
+- `DX12Context.h` — `RenderScene` signature changed to `World*`; sort buffer changed to `pair<float, EntityID>`
+- `DX12Context.cpp` — render loops rewritten to iterate `world->renders` pool by index
+- `Game.h` — all `Entity*` tracking replaced with `EntityID`; `BurningSprite` struct removed
+- `Game.cpp` — all entity creation/mutation/destruction ported to ECS API
+
+**Why free-function systems instead of a system class hierarchy:**  
+System classes add boilerplate (registration, ordering, virtual dispatch) without benefit at this
+engine's scale. Each subsystem is a self-contained block inside `Game::Update` that iterates one
+or two pools. The ECS gives data locality without introducing framework complexity.
+
+**Key lessons:**
+- Swap-with-last in `ComponentPool::Remove` is the key to keeping arrays dense without gaps.
+  After removing index `i`: copy last element to `i`, update the hash-map entry for the moved ID.
+- The burning system changed from a separate `vector<BurningSprite>` (entity pointers) to
+  iterating `world.burning` pool directly. This eliminates the pointer lifetime problem — if an
+  entity is destroyed, its pool entry is already gone.
+- The shadow and main-pass render loops both iterate `world->renders.Size()` and call
+  `world->transforms.Get(id)` per entity. The cost is one hash-map lookup per draw call, which
+  is negligible compared to the GPU work.
 
 ---
 
 ## Known Limitations
 
-- Hero entity sprites do not receive shadow (shadow SRV is bound but the billboard path in
-  `Material.hlsl` exits before the shadow sample when in sprite mode).
 - No audio.
-- No scene serialization — the scene is fully recreated from code each run.
-- No frustum culling — all 5 000 instanced sprites are uploaded even if off-screen.
-- Particle count resets to 0 each frame (fire particles re-added from `m_fireParticles` each
-  frame). This is intentional — it avoids stale particles persisting when entities are removed.
+- No scene serialization — the world is fully recreated from code each run.
+- Frustum culling only applies to the instanced sprite batch. Hero sprites, cubes, and explosion
+  spheres are always submitted regardless of visibility.
+- Particle count resets to 0 each frame and is rebuilt from `m_fireParticles`. Intentional —
+  avoids stale particles persisting when entities are removed.
+- The distort pass ring width (`kRingWidth = 0.75` metres) is a constant. Very large explosions
+  produce a proportionally thinner-looking ring than small ones.

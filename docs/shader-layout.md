@@ -1,6 +1,6 @@
 # Shader and Root Signature Layout
 
-This engine has five rendering pipelines. Each has its own root signature.
+This engine has seven rendering pipelines. Each has its own root signature.
 The golden rule: **C++ struct layout and HLSL cbuffer field order must match exactly.**
 Any mismatch silently corrupts output or causes a D3D12 validation error.
 
@@ -8,14 +8,14 @@ Any mismatch silently corrupts output or causes a D3D12 validation error.
 
 ## Pipeline 1 — Main Geometry (Material.hlsl)
 
-Used for: hero entities, ground plane, explosion spheres, targeting ring.
+Used for: hero entities, ground plane, explosion spheres, targeting ring, blob shadows.
 
 ### Root Signature
 
 | Slot | Type | Register | Content |
 |---|---|---|---|
 | 0 | Root CBV | b0 | PerFrame constants |
-| 1 | Root CBV | b1 | PerObject constants |
+| 1 | Root 32-bit constants | b1 | PerObject constants (28 DWORDs) |
 | 2 | Descriptor table | t1, t2 | Sprite texture SRV + shadow map SRV |
 
 Static samplers: `s0` POINT (sprite), `s1` comparison LESS_EQUAL (shadow PCF).
@@ -33,24 +33,27 @@ struct PerFrameCbData {
 };
 ```
 
-### PerObject CB (b1) — uploaded per draw call
+Double-buffered: `m_perFrameCb` is 2×256 bytes; each frame writes to `256 * frameIndex` offset.
+
+### PerObject constants (b1) — uploaded per draw call via `SetGraphicsRoot32BitConstants`
 
 ```cpp
-struct PerObjectCbData {
-    mat4 worldMatrix;    // 64 bytes
-    vec4 tintColor;      // 16 bytes
-    vec4 renderParams;   // 16 bytes
-};
+struct PerObjectData {
+    mat4 worldMatrix;  // 64 bytes (16 floats)
+    vec4 color;        // 16 bytes  — tint RGBA
+    vec4 renderParams; // 16 bytes
+    vec4 spriteUVRect; // 16 bytes  — atlas sub-rect (u0,v0,u1,v1)
+};                     // 112 bytes total = 28 DWORDs
 ```
 
 `renderParams` packing:
 
-| Component | Shadow pass | Main pass |
-|---|---|---|
-| `.x` | `1.0` (shadow mode flag) | `1.0` if blob shadow |
-| `.y` | `1.0` if sprite texture | `1.0` if sprite texture |
-| `.z` | `0.0` | `1.0` if `isUnlit` |
-| `.w` | unused | unused |
+| Component | Value |
+|---|---|
+| `.x` | `1.0` if blob shadow |
+| `.y` | `1.0` if `usesSpriteTexture` |
+| `.z` | `1.0` if `isUnlit` |
+| `.w` | unused |
 
 ### VS (VSMain) — Material.hlsl
 
@@ -58,42 +61,41 @@ struct PerObjectCbData {
 float4 clipPos = mul(mul(mul(float4(pos,1), worldMatrix), viewMatrix), projMatrix);
 ```
 
-Outputs to PS: `worldPos`, `worldNormal`, `uv`, `clipYW` (for fog), `shadowCoord` (projected into light space).
+Outputs to PS: `worldPos`, `worldNormal`, `uv`, `clipYW` (for fog), `shadowCoord`.
 
 ### PS (PSMain) — Material.hlsl
 
 Branch tree:
 
 ```
-if renderParams.x > 0.5  →  shadow mode: dark translucent output, fog-aware, early return
+if renderParams.x > 0.5  →  blob shadow mode: dark translucent, fog-aware, early return
 if renderParams.z > 0.5  →  unlit mode: return rgb directly, no lighting/fog, early return
-if renderParams.y > 0.5  →  sprite mode: sample texture, clip on alpha < 0.1, apply fog
+if renderParams.y > 0.5  →  sprite mode: sample texture, alpha clip, apply fog
 else                     →  geometry mode: full lighting pipeline
 ```
 
 **Geometry lighting (in order):**
-1. Sample shadow map with PCF (`SampleCmpLevelZero`) — `shadow ∈ [0,1]`
-2. Key light (directional, warm): `max(0, dot(N, L)) × shadowFactor`
-3. Fill light (directional, cool, opposite side): `max(0, dot(N, Lfill))`
+1. Shadow map PCF (`SampleCmpLevelZero`) — `shadow ∈ [0,1]`
+2. Key light (directional, warm): `max(0, dot(N, L)) × shadow`
+3. Fill light (directional, cool, opposite side)
 4. Ambient: flat constant
-5. Edge darkening: `pow(1 - NdotV, 3)` darkens silhouettes
+5. Edge darkening: `pow(1 - NdotV, 3)`
 6. Floor-only detail: checker pattern + normal perturbation
-7. Sky-gradient fog: `fogT = (camDist - 20) / (65 - 20)`, blend toward horizon/zenith color,
-   geometry blend capped at `fogT × 0.7` to preserve some geometry through fog
+7. Sky-gradient fog: blend toward horizon/zenith color based on `clipY/clipW`
 
 ---
 
 ## Pipeline 2 — GPU-Instanced Sprites
 
-Used for: 5 000 bulk sprite entities (`useInstancing = true`).
+Used for: 5 000 bulk sprite entities (`isInstanced = true`).
 
-### Root Signature (instanced sprite)
+### Root Signature
 
 | Slot | Type | Register | Content |
 |---|---|---|---|
 | 0 | Root CBV | b0 | PerFrame CB (same struct as geometry) |
-| 1 | Descriptor table | t1 | Sprite atlas texture SRV |
-| 2 | Root SRV | t0 | Instance data buffer (structured) |
+| 1 | Root SRV | t0 | Instance data buffer (structured) |
+| 2 | Descriptor table | t1 | Sprite atlas texture SRV |
 
 Static sampler: `s0` POINT.
 
@@ -126,7 +128,7 @@ StructuredBuffer<SpriteInstance> g_instances : register(t0);
 ### VS
 
 ```hlsl
-SpriteInstance inst = g_instances[instanceId];
+SpriteInstance inst = g_instances[SV_InstanceID];
 float4 wp = mul(float4(localPos, 1), inst.world);
 wp.y += sin(time * 1.45 + inst.hoverData.x) * 0.10;  // GPU hover
 float4 vp = mul(mul(wp, viewMatrix), projMatrix);
@@ -136,10 +138,10 @@ float4 vp = mul(mul(wp, viewMatrix), projMatrix);
 
 ```hlsl
 float4 col = g_sprite.Sample(g_smp, uv) * inst.tint;
-clip(col.a - 0.1);                   // alpha clip
-// sky-gradient fog blend
+clip(col.a - 0.1);
+// sky-gradient fog
 // base ambient occlusion (bottom darkening)
-// shadow receive (PCF sample)
+// shadow map receive (PCF)
 return col;
 ```
 
@@ -149,7 +151,7 @@ return col;
 
 Used for: fire trail, burning sprite VFX.
 
-### Root Signature (particle)
+### Root Signature
 
 | Slot | Type | Register | Content |
 |---|---|---|---|
@@ -168,13 +170,13 @@ struct SceneParticle {
 };
 ```
 
-This is what `Game.cpp` fills in `scene.GetParticles()`. It is `memcpy`'d directly to the GPU
-upload buffer — the HLSL `ParticleData` struct must match exactly.
+Filled by `Game.cpp` into `world->particles`, `memcpy`'d to the GPU upload buffer each frame.
+HLSL `ParticleData` must match exactly.
 
 ### VS
 
 Reads `ParticleData` via `StructuredBuffer<ParticleData> g_particles : register(t0)`.
-Expands each particle into a camera-facing quad using camera right/up extracted from the view matrix:
+Expands each particle into a camera-facing quad using camera right/up from the view matrix:
 
 ```hlsl
 float3 camRight = float3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
@@ -185,12 +187,12 @@ float3 wp = center + (camRight * offset.x + camUp * offset.y) * p.size;
 ### PS
 
 ```hlsl
-float2 uv  = input.localUV * 2 - 1;       // [-1,1]
+float2 uv  = input.localUV * 2 - 1;
 float  r2  = dot(uv, uv);
-clip(1 - r2);                              // discard outside circle
+clip(1 - r2);                         // discard outside circle
 float  edge = 1 - r2;
-float3 hot  = float3(1.4, 1.1, 0.3);      // bright yellow center
-float3 cool = float3(0.9, 0.2, 0.05);     // orange-red edge
+float3 hot  = float3(1.4, 1.1, 0.3); // bright yellow center
+float3 cool = float3(0.9, 0.2, 0.05);
 float3 col  = lerp(cool, hot, edge * edge) * p.color.rgb;
 return float4(col * p.color.a, p.color.a);
 ```
@@ -202,24 +204,101 @@ Blend: additive (`DestBlend = ONE`). Depth test ON, depth write OFF.
 ## Pipelines 4 & 5 — Shadow (Depth Only)
 
 Two depth-only PSOs:
-- `m_shadowPso` — for geometry (reads world matrix from root constants).
-- `m_shadowSpritePso` — for hero billboard sprites (cylindrical billboard in VS).
+- `m_shadowPso` — geometry: world matrix from root constants.
+- `m_shadowSpritePso` — hero billboard sprites: cylindrical billboard in VS.
 
-Both write only to the depth buffer. No pixel shader. `DepthBias` is set to reduce acne.
+Both write only to the depth buffer. No pixel shader.
 
 ---
 
-## Pipelines 6–9 — Post-Process (Fullscreen Triangles)
+## Pipeline 6 — Shockwave Air Distortion
+
+Used for: post-process fullscreen distortion ring over live explosion shockwaves.
+
+### Root Signature
+
+| Slot | Type | Register | Content |
+|---|---|---|---|
+| 0 | Root CBV (PIXEL) | b0 | ShockwaveCB (256 bytes) |
+| 1 | Descriptor table (PIXEL) | t0 | HDR scene color SRV |
+
+Static sampler: `s0` LINEAR CLAMP.
+
+### ShockwaveCB (b0) — 64 floats = 256 bytes
+
+```
+Offset  Field             Type      Notes
+[0]     waveCount         float     number of active waves (≤ 8)
+[1]     proj00            float     projMatrix.m[0] = cot(fovY/2)/aspect
+[2]     proj11            float     projMatrix.m[5] = cot(fovY/2)
+[3]     groundY           float     world-space Y of the ground plane (-1.0)
+[4-6]   cameraEye.xyz     float3    camera world position
+[7]     pad
+[8-10]  cameraRight.xyz   float3    view matrix col 0
+[11]    pad
+[12-14] cameraUp.xyz      float3    view matrix col 1
+[15]    pad
+[16-18] cameraBack.xyz    float3    view matrix col 2  (normalize(eye - target))
+[19]    pad
+[20-51] waves[8]          float4×8  .x=worldX .y=worldZ .z=worldRadius(m) .w=uvStrength
+[52-63] pad
+```
+
+Filled in `RenderScene` (where `frameData` and `camera` are in scope). Camera basis is extracted
+from the view matrix columns: `cameraRight = (vm[0], vm[4], vm[8])`, etc. (row-major `m[row*4+col]`).
+
+### Shader logic
+
+```hlsl
+// Reconstruct world-space ray
+float2 ndc    = float2(uv.x*2-1, 1-uv.y*2);
+float3 rayDir = normalize(cameraRight*(ndc.x/proj00) + cameraUp*(ndc.y/proj11) - cameraBack);
+
+if (rayDir.y < -0.001f)  // pixel hits the ground plane
+{
+    float  t_hit    = (groundY - cameraEye.y) / rayDir.y;
+    float3 worldHit = cameraEye + rayDir * t_hit;
+
+    for each wave:
+        float2 delta      = worldHit.xz - wave.xy;
+        float  dist       = length(delta);
+        float  ring       = (1 - |dist - worldRadius| / 0.75)²;
+
+        // UV offset direction: project world outward into screen space
+        float3 worldOut = normalize(float3(delta.x, 0, delta.y));
+        float2 uvDir    = normalize(float2(dot(worldOut, cameraRight),
+                                          -dot(worldOut, cameraUp)));
+        totalOffset    += uvDir * ring * strength;
+}
+
+return hdrInput.Sample(linearSmp, uv + totalOffset).rgb;
+```
+
+The ring is computed in world-space metres, so it automatically foreshortens correctly at any
+camera angle. Sky pixels (where `rayDir.y >= 0`) receive no distortion.
+
+---
+
+## Pipelines 7–10 — Post-Process (Fullscreen Triangles)
 
 All use the same pattern: no vertex buffer, `DrawInstanced(3,1,0,0)`, VS generates positions
-from `vertexId` into a fullscreen triangle. SRVs bound via descriptor table.
+from `SV_VertexID` into a fullscreen triangle. SRVs bound via descriptor table.
 
 | PSO | Input SRV | Output RTV | What it does |
 |---|---|---|---|
 | `m_brightPassPso` | HDR target | bloomA (half-res) | Extract bright pixels |
 | `m_blurHPso` | bloomA | bloomB | 9-tap horizontal Gaussian |
 | `m_blurVPso` | bloomB | bloomA | 9-tap vertical Gaussian |
-| `m_tonemapPso` | HDR + bloomA | back buffer | ACES tonemap + composite + scanlines/dither |
+| `m_tonemapPso` | distortTarget + bloomA | back buffer | ACES tonemap + composite + scanlines/dither |
+
+Note: the tonemap reads `distortTarget` (not raw HDR) — the distortion is baked in before tonemap.
+
+### Post-Process Root Signature
+
+| Slot | Type | Register | Content |
+|---|---|---|---|
+| 0 | Root CBV (ALL) | b0 | PostCB |
+| 1 | Descriptor table (PIXEL) | t0, t1 | Two SRVs (varies per pass) |
 
 ### Post-Process CB
 
@@ -245,8 +324,10 @@ cbuffer PostCB : register(b0) {
 |---|---|
 | C++ struct size ≠ HLSL cbuffer size | Corrupt constants, wrong colors/transforms |
 | Sprite PSO `RTVFormats[0]` wrong | Blank sprite output (no error on some hardware) |
-| Instanced sprite stride wrong (not 112) | Every sprite uses wrong instance slot — all show instance 0 or garbage |
+| Instanced sprite stride wrong (not 112) | Every sprite uses wrong instance slot |
 | Missing barrier before shadow map SRV use | GPU validation error or corrupted shadows |
-| Root SRV slot offset not multiplied by frame index | Both frames share same particle/instance data — tearing artifact |
-| Particle depth-write ON | Particles block each other based on draw order — opaque-looking fire |
-| `Num32BitValues` in `SetGraphicsRoot32BitConstants` not matching struct field count | First N fields correct, rest are zero or previous frame's data |
+| Root SRV slot offset not multiplied by frame index | Both frames share same particle/instance data |
+| Particle depth-write ON | Particles block each other — opaque-looking fire |
+| Tonemap SRV pointing at HDR instead of distortTarget | Distortion pass has no visible effect |
+| ShockwaveCB camera basis extracted from wrong matrix rows/cols | Ring direction rotates incorrectly with camera |
+| `worldRadius` passed as normalized (0–1) instead of metres | Ring size scales with window aspect ratio, not world geometry |

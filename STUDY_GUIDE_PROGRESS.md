@@ -16,9 +16,11 @@ The architecture and pipeline docs in `docs/` are the reference; this file is pe
 ```
 Shadow pass     → shadow map 2048×2048 (depth only)
 MSAA main pass  → geometry + 5000 instanced sprites + particles → 8×MSAA HDR target
+  └ shockwave CB pre-filled here (camera + world data both in scope)
 Resolve         → MSAA target → HDR R16G16B16A16_FLOAT
-Bloom           → bright-pass → blur-H → blur-V (all at half resolution)
-Tonemap         → HDR + bloom → backbuffer, ACES curve, optional scanlines/dither
+Bloom           → bright-pass → blur-H → blur-V (half resolution)
+Distort         → world-space shockwave ring → distortTarget (full resolution)
+Tonemap         → distortTarget + bloom → backbuffer, ACES curve, optional scanlines/dither
 ```
 
 ### Active scene objects
@@ -26,14 +28,15 @@ Tonemap         → HDR + bloom → backbuffer, ACES curve, optional scanlines/d
 | Group | Count | Notes |
 |---|---|---|
 | Ground plane | 1 | Large flat geometry, checker/normal detail in shader |
-| Animated cubes | ~4 | Simple test geometry, colored, animated |
-| Hero billboard sprites | 3 | Full per-entity draw, sprite atlas texture, shadow receive |
+| Animated cubes | 3 | Simple test geometry, colored, sinusoidally animated |
+| Hero billboard sprites | 3 | Full per-entity draw, sprite atlas texture, shadow cast |
 | Blob shadows | 3 | One per hero sprite, flat oval mesh |
 | Targeting ring | 1 | Unlit flat ring, follows mouse cursor on ground |
 | Bulk instanced sprites | 5 000 | GPU-instanced, GPU hover animation, per-sprite tint |
-| Meteors | dynamic | Sphere mesh, downward velocity, spawned on left-click |
+| Meteors | dynamic | Sphere mesh, PhysicsComp, spawned on left-click |
 | Explosion spheres | dynamic | Expand over ~1s, trigger scorch zone, then removed |
 | Fire particles | dynamic | CPU-sim, GPU-additive-billboard, emitted by meteors + burning sprites |
+| Burning sprites | dynamic | BurningComp + PhysicsComp, tint-shift to red then disabled |
 
 ---
 
@@ -41,17 +44,21 @@ Tonemap         → HDR + bloom → backbuffer, ACES curve, optional scanlines/d
 
 | I want to understand... | Read this |
 |---|---|
-| Full frame sequence | `DX12Context::RenderScene` in `Source/DX12Context.cpp` |
+| Full frame sequence | `DX12Context::RenderScene` + `EndFrame` in `Source/DX12Context.cpp` |
 | All GPU pipelines and their shaders | `docs/shader-layout.md` |
 | All render passes in order | `docs/render-pipeline.md` |
+| How entities are created and accessed | `Source/ECS.h`, `Source/Components.h`, `Source/World.h` |
+| How component pools work internally | `ComponentPool<T>` in `Source/ECS.h` (~70 lines) |
 | How meteors, explosions, particles work | `Game::Update` in `Source/Game.cpp` |
+| How the burning system works | Burning section near end of `Game::Update` |
 | How the targeting ring follows the mouse | Ray cast section in `Game::Update` |
 | How 5000 sprites avoid a CPU loop | Instanced sprite section in `DX12Context::RenderScene` |
 | How the hover animation works on GPU | Instanced sprite VS in `DX12Context.cpp` |
 | How shadows are cast and received | Shadow pass in `DX12Context::RenderScene` + `Material.hlsl` PS |
+| How the shockwave distortion works | `CreateDistortPipeline` + distort pass in `EndFrame` |
+| Why the ring is an ellipse, not a circle | Distort PS in `DX12Context.cpp` (ray-plane intersection) |
 | How bloom and tonemap work | Post-process pipelines in `DX12Context.cpp` |
 | How the camera orbit/pan/zoom works | `Game::Update` camera section |
-| How entities are drawn | `Entity::Draw` in `Source/Entity.cpp` |
 | Math helpers | `Source/EngineMath.h` |
 | Controls reference | `CONTROLS.txt` |
 
@@ -79,9 +86,10 @@ Use this to track what you have understood. Mark each when you can explain it wi
 - [ ] Row-major vs column-major: which convention this engine uses and where it matters
 - [ ] How `MatrixLookAtRH` builds the view matrix from eye, target, up
 - [ ] How `MatrixPerspectiveRH` maps 3D space to clip space
-- [ ] How to extract camera basis vectors (right, up, back) from the view matrix
+- [ ] How to extract camera basis vectors (right, up, back) from the view matrix columns
 - [ ] What the NDC (normalized device coordinates) are and how to unproject a screen pixel to a world ray
 - [ ] What `MatrixBillboard` does and why it is cylindrical (Y-locked) rather than spherical
+- [ ] Why `proj00 = projMatrix.m[0]` and `proj11 = projMatrix.m[5]` are the unproject denominators
 
 ### Rendering
 - [ ] Why the main pass renders to an MSAA target and not directly to the back buffer
@@ -91,13 +99,23 @@ Use this to track what you have understood. Mark each when you can explain it wi
 - [ ] Why additive particles need depth-write OFF but depth-test ON
 - [ ] Why the bloom pass works at half resolution
 - [ ] What ACES tone mapping does and why you need it in an HDR pipeline
+- [ ] Why the tonemap samples `distortTarget` instead of the raw HDR target
+- [ ] Why a screen-space ring is always circular but a world-space ray-plane ring is an ellipse
+
+### ECS
+- [ ] Why `EntityID` is just a uint32_t (data lives in pools, not in objects)
+- [ ] How `ComponentPool<T>` uses a hash-map index into dense parallel arrays
+- [ ] Why `Remove` uses swap-with-last to keep arrays dense
+- [ ] How `DestroyEntity(id)` removes an entity from every pool at once
+- [ ] How the render loop iterates `world->renders` by index without iterating every pool
 
 ### Game Logic
 - [ ] How the LCG (`m_meteorRng`, `m_particleRng`) produces pseudo-random numbers
 - [ ] How the mouse ray is cast from screen pixel to world position
-- [ ] How the scorch zone decides which sprites start burning (radius check per sprite)
-- [ ] How `BurningSprite` shifts tint over time and disables the entity on burnout
-- [ ] How `FireParticle` (CPU sim) maps to `SceneParticle` (GPU upload)
+- [ ] How the scorch zone decides which sprites get `BurningComp` (radius check per sprite)
+- [ ] How iterating `world.burning` pool directly avoids the old `BurningSprite` pointer lifetime problem
+- [ ] How `FireParticle` (CPU sim) maps to `SceneParticle` (GPU upload) each frame
+- [ ] How `world->shockwaves` is built from live explosions and consumed by the distort pass
 
 ---
 
@@ -133,7 +151,12 @@ Learned: [the concept this confirmed or revealed]
 | LCG | Linear Congruential Generator — a cheap PRNG using multiply-add-modulo |
 | Billboard | A quad that always faces the camera; cylindrical = Y-axis locked (sprites), spherical = fully facing |
 | Additive blend | `result = src + dest` — particles accumulate brightness, never darken |
-| Scorch zone | The ring between the kill radius and 1.8× explosion radius where sprites start burning |
+| Scorch zone | The ring between the kill radius and ~1.8× explosion radius where sprites start burning |
 | Upload buffer | A CPU-writable, GPU-readable D3D12 resource in `UPLOAD` heap — used for streaming data each frame |
 | Root SRV | An SRV bound directly in the root signature (not via descriptor heap) — simpler, 1 DWORD cost |
 | Structured buffer | A buffer with a fixed per-element stride, readable in HLSL via `StructuredBuffer<T>` |
+| EntityID | A uint32_t that names an entity — data lives in component pools, not in the ID itself |
+| ComponentPool | Sparse-set: hash-map from EntityID → dense array index; arrays are iterated cache-linearly |
+| Sparse-set | Data structure combining O(1) lookup (via hash-map) with O(N) cache-friendly iteration (dense arrays) |
+| Ray-plane intersection | Finding where a view ray hits the ground plane: `t = (planeY - eye.y) / dir.y`, `hit = eye + t*dir` |
+| Foreshortening | Perspective compression: a ring on the ground looks like an ellipse from an oblique angle |

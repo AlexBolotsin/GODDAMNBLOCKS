@@ -1,0 +1,22 @@
+========================================
+  CONTROLS
+========================================
+
+  CAMERA
+  ------
+  [Right Mouse]  Hold + drag   Orbit camera
+  [Middle Mouse] Hold + drag   Pan camera
+  [Scroll Wheel]               Zoom in / out
+
+  TARGETING
+  ---------
+  [Mouse Move]                 Move targeting ring
+  [Left Click]                 Cast 3-5 meteors at ring
+
+  VISUAL TOGGLES
+  --------------
+  [Space]                      Toggle cinematic mode
+  [C]                          Toggle scanlines / phosphor grid
+  [V]                          Toggle Bayer dithering
+
+========================================

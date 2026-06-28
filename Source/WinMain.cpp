@@ -141,7 +141,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int /*nCmdShow*/)
         game.Update(dt, input);
 
         dx12.BeginFrame();
-        dx12.RenderScene(&game.GetScene(), game.GetCamera());
+        dx12.RenderScene(&game.GetWorld(), game.GetCamera());
         dx12.EndFrame();
     }
 

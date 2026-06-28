@@ -9,9 +9,9 @@
 #include <vector>
 #include "EngineMath.h"
 #include "Camera.h"
+#include "ECS.h"
 
-class Scene;
-class Entity;
+class World;
 
 class DX12Context
 {
@@ -23,8 +23,17 @@ public:
     void Shutdown();
     void Resize(uint32_t width, uint32_t height);
 
+    // Per-frame camera + lighting data passed from RenderScene to EndFrame via member
+    struct FrameCameraData
+    {
+        mat4 viewMatrix;
+        mat4 projMatrix;
+        mat4 lightViewProjMatrix;
+        D3D12_GPU_VIRTUAL_ADDRESS perFrameGpuAddr = 0;
+    };
+
     void BeginFrame();
-    void RenderScene(Scene* scene, const Camera& camera);
+    void RenderScene(World* world, const Camera& camera);
     void EndFrame();
 
     ID3D12Device* GetDevice() const { return m_device.Get(); }
@@ -94,7 +103,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_particleBuffer;
     uint8_t*                                      m_particleMapped = nullptr;
     static constexpr uint32_t kMaxParticles = 8000;
-    std::vector<std::pair<float, const Entity*>> m_instanceSortBuf;
+    std::vector<std::pair<float, EntityID>> m_instanceSortBuf;
     mat4  m_lightViewProj;
     vec3  m_lightPos;
     float    m_fps              = 0.0f;

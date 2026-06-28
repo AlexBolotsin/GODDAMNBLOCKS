@@ -20,6 +20,7 @@ set(SOURCES
     Source/Material.cpp
     Source/Entity.cpp
     Source/Scene.cpp
+    Source/World.cpp
     Source/Game.cpp
 )
 
@@ -34,6 +35,9 @@ set(HEADERS
     Source/Material.h
     Source/Entity.h
     Source/Scene.h
+    Source/ECS.h
+    Source/Components.h
+    Source/World.h
     Source/Game.h
 )
 

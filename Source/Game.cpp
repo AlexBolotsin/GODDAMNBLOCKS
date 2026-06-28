@@ -2,7 +2,6 @@
 #include "DX12Context.h"
 #include "Mesh.h"
 #include "Material.h"
-#include "Entity.h"
 #include "InputState.h"
 #include <cmath>
 #include <algorithm>
@@ -176,7 +175,6 @@ namespace
         return mesh->Init(device, vertices, indices) ? mesh : nullptr;
     }
 
-    // Flat horizontal quad in XZ plane with full UVs — used for blob circle shadows on the floor
     std::shared_ptr<Mesh> CreateBlobShadowMesh(ID3D12Device* device)
     {
         std::vector<Vertex> vertices =
@@ -225,76 +223,70 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
     }
     m_material->SetShadowMap(dx12.GetDevice(), dx12.GetShadowMap());
 
+    // ---- World setup -------------------------------------------------------
+
     // Ground plane
     {
-        Entity& ground = m_scene.CreateEntity();
-        ground.mesh = m_groundMesh;
-        ground.material = m_material;
-        ground.transform.SetPosition(0.0f, -1.0f, -5.0f);
-        ground.transform.SetScale(100.0f, 1.0f, 100.0f);
-        ground.tint = vec4(0.95f, 0.95f, 0.95f, 1.0f);
+        EntityID id = m_world.CreateEntity();
+        auto& xf = m_world.transforms.Add(id);
+        xf.transform.SetPosition(0.0f, -1.0f, -5.0f);
+        xf.transform.SetScale(100.0f, 1.0f, 100.0f);
+        auto& rnd = m_world.renders.Add(id);
+        rnd.mesh     = m_groundMesh;
+        rnd.material = m_material;
+        rnd.tint     = vec4(0.95f, 0.95f, 0.95f, 1.0f);
     }
 
-    // Targeting ring gizmo — position/visibility updated every frame in Update
+    // Targeting ring gizmo
     {
-        Entity& ring = m_scene.CreateEntity();
-        ring.mesh                 = m_targetRingMesh;
-        ring.material             = m_material;
-        ring.castsProjectedShadow = false;
-        ring.isUnlit              = true;
-        ring.enabled              = false;
-        m_targetRing              = &ring;
+        m_targetRing = m_world.CreateEntity();
+        m_world.transforms.Add(m_targetRing);
+        auto& rnd = m_world.renders.Add(m_targetRing);
+        rnd.mesh                  = m_targetRingMesh;
+        rnd.material              = m_material;
+        rnd.castsProjectedShadow  = false;
+        rnd.isUnlit               = true;
+        rnd.visible               = false;
     }
 
     // Cubes
     m_cubeActors.reserve(3);
     for (int i = 0; i < 3; ++i)
     {
-        Entity& entity = m_scene.CreateEntity();
-        entity.mesh = m_cubeMesh;
-        entity.material = m_material;
-        entity.transform.SetPosition(-2.0f + i * 2.0f, 0.0f, -5.0f);
-        entity.transform.SetScale(0.75f + i * 0.2f, 0.75f + i * 0.2f, 0.75f + i * 0.2f);
-        entity.transform.SetRotation(QuatRotationAxis(vec3(0.0f, 1.0f, 0.0f), i * 0.35f));
-        entity.tint = vec4(
-            0.2f + i * 0.3f,
-            0.2f + (i % 2) * 0.5f,
-            0.2f + ((i + 1) % 2) * 0.5f,
-            1.0f);
-        m_cubeActors.push_back(&entity);
+        EntityID id = m_world.CreateEntity();
+        auto& xf = m_world.transforms.Add(id);
+        xf.transform.SetPosition(-2.0f + i * 2.0f, 0.0f, -5.0f);
+        xf.transform.SetScale(0.75f + i * 0.2f, 0.75f + i * 0.2f, 0.75f + i * 0.2f);
+        xf.transform.SetRotation(QuatRotationAxis(vec3(0.0f, 1.0f, 0.0f), i * 0.35f));
+        auto& rnd = m_world.renders.Add(id);
+        rnd.mesh     = m_cubeMesh;
+        rnd.material = m_material;
+        rnd.tint     = vec4(0.2f + i * 0.3f,
+                            0.2f + (i % 2) * 0.5f,
+                            0.2f + ((i + 1) % 2) * 0.5f,
+                            1.0f);
+        m_cubeActors.push_back(id);
     }
 
-    // Sprite actors — base Y -0.15 so bottom just touches floor at lowest hover point
+    // Sprite actors — base Y -0.15 so bottom just touches floor at lowest hover
     m_spriteActors.reserve(3);
     for (int i = 0; i < 3; ++i)
     {
-        Entity& sprite = m_scene.CreateEntity();
-        sprite.mesh = m_spriteMesh;
-        sprite.material = m_material;
-        sprite.isBillboardActor = true;
-        sprite.castsProjectedShadow = true;
-        sprite.usesSpriteTexture = true;
-        sprite.transform.SetPosition(-2.8f + i * 2.8f, -0.15f, -3.4f);
-        sprite.transform.SetScale(1.1f, 1.5f, 1.0f);
-        sprite.tint = vec4(1.0f, 1.0f, 1.0f, 1.0f);
-        m_spriteActors.push_back(&sprite);
+        EntityID id = m_world.CreateEntity();
+        auto& xf = m_world.transforms.Add(id);
+        xf.transform.SetPosition(-2.8f + i * 2.8f, -0.15f, -3.4f);
+        xf.transform.SetScale(1.1f, 1.5f, 1.0f);
+        auto& rnd = m_world.renders.Add(id);
+        rnd.mesh                  = m_spriteMesh;
+        rnd.material              = m_material;
+        rnd.isBillboard           = true;
+        rnd.castsProjectedShadow  = true;
+        rnd.usesSpriteTexture     = true;
+        m_world.sprites.Add(id); // SpriteComp for uvRect / hoverPhase / animation
+        m_spriteActors.push_back(id);
     }
 
-    // Blob circle shadows — one flat quad per sprite, just above the floor
-    m_blobActors.reserve(3);
-    for (int i = 0; i < 3; ++i)
-    {
-        Entity& blob = m_scene.CreateEntity();
-        blob.mesh = m_blobMesh;
-        blob.material = m_material;
-        blob.isBlobShadow = true;
-        blob.castsProjectedShadow = false;
-        blob.transform.SetPosition(-2.8f + i * 2.8f, -0.999f, -3.4f);
-        blob.transform.SetScale(0.7f, 1.0f, 0.7f);
-        blob.tint = vec4(0.0f, 0.0f, 0.0f, 0.75f);
-        m_blobActors.push_back(&blob);
-    }
-
+    // Sprite atlas animation sets
     const std::vector<vec4> kAnimSets[3] =
     {
         {   // row_00
@@ -331,16 +323,30 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
             MakeAtlasRect(210.0f, 64.0f, 17.0f, 24.0f),
         },
     };
+    for (int i = 0; i < 3; ++i)
+        m_world.sprites.Get(m_spriteActors[i])->animFrames = kAnimSets[i];
 
-    m_spriteActors[0]->animFrames = kAnimSets[0];
-    m_spriteActors[1]->animFrames = kAnimSets[1];
-    m_spriteActors[2]->animFrames = kAnimSets[2];
+    // Blob circle shadows — one per hero sprite, just above the floor
+    m_blobActors.reserve(3);
+    for (int i = 0; i < 3; ++i)
+    {
+        EntityID id = m_world.CreateEntity();
+        auto& xf = m_world.transforms.Add(id);
+        xf.transform.SetPosition(-2.8f + i * 2.8f, -0.999f, -3.4f);
+        xf.transform.SetScale(0.7f, 1.0f, 0.7f);
+        auto& rnd = m_world.renders.Add(id);
+        rnd.mesh                  = m_blobMesh;
+        rnd.material              = m_material;
+        rnd.isBlobShadow          = true;
+        rnd.castsProjectedShadow  = false;
+        rnd.tint                  = vec4(0.0f, 0.0f, 0.0f, 0.75f);
+        m_blobActors.push_back(id);
+    }
 
-    // 5000 bulk sprites scattered across the floor
+    // 5000 bulk sprites scattered across the floor (GPU-instanced)
     static constexpr int kBulkCount = 5000;
     m_bulkSpriteActors.reserve(kBulkCount);
 
-    // Deterministic LCG — no need for rand()/srand()
     uint32_t rng = 0xDEADBEEFu;
     auto Rng = [&rng]() -> float {
         rng = rng * 1664525u + 1013904223u;
@@ -351,26 +357,28 @@ bool Game::Init(DX12Context& dx12, const wchar_t* shaderPath, const wchar_t* spr
     {
         const float x   = (Rng() - 0.5f) * 90.0f;
         const float z   = (Rng() - 0.5f) * 90.0f - 5.0f;
-        const int   row = static_cast<int>(Rng() * 2.99f); // 0, 1, or 2
+        const int   row = static_cast<int>(Rng() * 2.99f);
 
-        Entity& sprite              = m_scene.CreateEntity();
-        sprite.mesh                 = m_spriteMesh;
-        sprite.material             = m_material;
-        sprite.isBillboardActor     = true;
-        sprite.castsProjectedShadow = false;
-        sprite.usesSpriteTexture    = true;
-        sprite.transform.SetPosition(x, -0.15f, z);
-        sprite.transform.SetScale(1.1f, 1.5f, 1.0f);
-        sprite.tint                 = vec4(1.0f, 1.0f, 1.0f, 1.0f);
-        sprite.animFrames           = kAnimSets[row];
-        sprite.animTimer            = Rng() * 4.0f; // stagger starting frame
-        sprite.useInstancing        = true;
-        sprite.hoverPhase           = static_cast<float>(i) * 0.13f;
-        sprite.tint = vec4(0.88f + Rng() * 0.24f,
-                           0.88f + Rng() * 0.24f,
-                           0.88f + Rng() * 0.24f,
-                           1.0f);
-        m_bulkSpriteActors.push_back(&sprite);
+        EntityID id = m_world.CreateEntity();
+        auto& xf = m_world.transforms.Add(id);
+        xf.transform.SetPosition(x, -0.15f, z);
+        xf.transform.SetScale(1.1f, 1.5f, 1.0f);
+        auto& rnd = m_world.renders.Add(id);
+        rnd.mesh                  = m_spriteMesh;
+        rnd.material              = m_material;
+        rnd.isBillboard           = true;
+        rnd.castsProjectedShadow  = false;
+        rnd.usesSpriteTexture     = true;
+        rnd.isInstanced           = true;
+        rnd.tint = vec4(0.88f + Rng() * 0.24f,
+                        0.88f + Rng() * 0.24f,
+                        0.88f + Rng() * 0.24f,
+                        1.0f);
+        auto& spr = m_world.sprites.Add(id);
+        spr.animFrames = kAnimSets[row];
+        spr.animTimer  = Rng() * 4.0f;
+        spr.hoverPhase = static_cast<float>(i) * 0.13f;
+        m_bulkSpriteActors.push_back(id);
     }
 
     return true;
@@ -381,12 +389,14 @@ void Game::Update(float dt, const InputState& input)
     m_time += dt;
     const float t = m_time;
 
-    m_scene.SetTime(m_time);
+    m_world.time = m_time;
 
     auto PRng = [this]() -> float {
         m_particleRng = m_particleRng * 1664525u + 1013904223u;
         return static_cast<float>(m_particleRng >> 16) / 65535.0f;
     };
+
+    // ---- Camera ------------------------------------------------------------
 
     if (input.cinematicToggled)
         m_cinematicMode = !m_cinematicMode;
@@ -403,12 +413,10 @@ void Game::Update(float dt, const InputState& input)
         m_cinematicTime += dt;
         const float ct = m_cinematicTime;
 
-        // Continuous slow orbit — different periods so the framing never repeats
         m_camAzimuth   = ct * 0.14f;
         m_camElevation = 0.08f + 0.55f * (0.5f + 0.5f * sinf(ct * 0.23f));
         m_camRadius    = 7.0f  + 14.0f * (0.5f + 0.5f * sinf(ct * 0.17f));
 
-        // Target wanders across the crowd to survey different sections
         m_camera.target = vec3(
             sinf(ct * 0.09f) * 22.0f,
             0.0f,
@@ -432,8 +440,8 @@ void Game::Update(float dt, const InputState& input)
             m_camera.target.x -= camFwdGround.x * static_cast<float>(input.mouseDeltaY) * panSpeed;
             m_camera.target.z -= camFwdGround.z * static_cast<float>(input.mouseDeltaY) * panSpeed;
         }
-        m_camRadius    -= static_cast<float>(input.scrollDelta) * kZoomSensitivity;
-        m_camRadius     = std::max(kMinRadius, std::min(kMaxRadius, m_camRadius));
+        m_camRadius -= static_cast<float>(input.scrollDelta) * kZoomSensitivity;
+        m_camRadius  = std::max(kMinRadius, std::min(kMaxRadius, m_camRadius));
     }
 
     const float cosEl = cosf(m_camElevation);
@@ -443,7 +451,8 @@ void Game::Update(float dt, const InputState& input)
         m_camera.target.y + sinEl * m_camRadius,
         m_camera.target.z + sinf(m_camAzimuth) * cosEl * m_camRadius);
 
-    // Unproject mouse cursor to ground plane (Y = -1.0) for targeting gizmo
+    // ---- Mouse targeting ---------------------------------------------------
+
     if (input.screenW > 0 && input.screenH > 0)
     {
         const float aspect  = static_cast<float>(input.screenW) / static_cast<float>(input.screenH);
@@ -453,13 +462,12 @@ void Game::Update(float dt, const InputState& input)
         const float ndcX = (static_cast<float>(input.mouseAbsX) / static_cast<float>(input.screenW)) * 2.0f - 1.0f;
         const float ndcY = 1.0f - (static_cast<float>(input.mouseAbsY) / static_cast<float>(input.screenH)) * 2.0f;
 
-        // Camera basis extracted from view matrix column vectors (stored across rows in m[])
         const vec3 camRight = { viewMat.m[0], viewMat.m[4], viewMat.m[8]  };
         const vec3 camUp    = { viewMat.m[1], viewMat.m[5], viewMat.m[9]  };
         const vec3 camBack  = { viewMat.m[2], viewMat.m[6], viewMat.m[10] };
 
-        const float vx = ndcX / projMat.m[0]; // projMat.m[0] = f/aspect
-        const float vy = ndcY / projMat.m[5]; // projMat.m[5] = f
+        const float vx = ndcX / projMat.m[0];
+        const float vy = ndcY / projMat.m[5];
         const vec3 rayDir = Vec3Normalize(vec3(
             camRight.x * vx + camUp.x * vy - camBack.x,
             camRight.y * vx + camUp.y * vy - camBack.y,
@@ -481,98 +489,88 @@ void Game::Update(float dt, const InputState& input)
         }
     }
 
-    // Update targeting ring gizmo
-    constexpr float kTargetRadius = 2.5f; // ring scale = meteor scatter radius
-    if (m_targetRing)
+    // ---- Targeting ring gizmo ---------------------------------------------
+
+    constexpr float kTargetRadius = 2.5f;
+    if (m_targetRing != kNullEntity)
     {
-        m_targetRing->enabled = m_hasTarget;
-        if (m_hasTarget)
+        TransformComp* ringXf  = m_world.transforms.Get(m_targetRing);
+        RenderComp*    ringRnd = m_world.renders.Get(m_targetRing);
+        if (ringRnd) ringRnd->visible = m_hasTarget;
+        if (m_hasTarget && ringXf && ringRnd)
         {
             const float pulse = 0.65f + 0.35f * sinf(t * 5.0f);
-            m_targetRing->transform.SetPosition(m_targetPos.x, -0.97f, m_targetPos.z);
-            m_targetRing->transform.SetScale(kTargetRadius, 1.0f, kTargetRadius);
-            m_targetRing->tint = vec4(1.0f, pulse, 0.05f, 1.0f); // orange-yellow pulse
+            ringXf->transform.SetPosition(m_targetPos.x, -0.97f, m_targetPos.z);
+            ringXf->transform.SetScale(kTargetRadius, 1.0f, kTargetRadius);
+            ringRnd->tint = vec4(1.0f, pulse, 0.05f, 1.0f);
         }
     }
 
-    // Cube animation
+    // ---- Cube animation ----------------------------------------------------
+
     for (size_t i = 0; i < m_cubeActors.size(); ++i)
     {
-        Entity* entity = m_cubeActors[i];
-        if (!entity)
-            continue;
-
+        TransformComp* xf = m_world.transforms.Get(m_cubeActors[i]);
+        if (!xf) continue;
         const float phase = static_cast<float>(i) * 0.9f;
-        entity->transform.SetPosition(
+        xf->transform.SetPosition(
             -2.0f + static_cast<float>(i) * 2.0f,
             sinf(t * 1.6f + phase) * 0.35f,
             -5.0f);
-        entity->transform.SetRotation(
+        xf->transform.SetRotation(
             QuatRotationAxis(vec3(0.0f, 1.0f, 0.0f),
                              t * (0.7f + static_cast<float>(i) * 0.35f) + phase));
     }
 
-    // Sprite hover animation — base Y -0.15 so feet touch floor at lowest hover point
-    // Burning sprites skip this so ragdoll physics owns their position
+    // ---- Sprite hover animation (hero sprites, skip if burning) -----------
+
     for (size_t i = 0; i < m_spriteActors.size(); ++i)
     {
-        Entity* sprite = m_spriteActors[i];
-        if (!sprite || sprite->isBurning)
-            continue;
-
+        EntityID id = m_spriteActors[i];
+        if (m_world.burning.Has(id)) continue;
+        TransformComp* xf = m_world.transforms.Get(id);
+        if (!xf) continue;
         const float phase = static_cast<float>(i) * 0.55f + 1.1f;
-        sprite->transform.SetPosition(
+        xf->transform.SetPosition(
             -2.8f + static_cast<float>(i) * 2.8f,
             -0.15f + sinf(t * 1.45f + phase) * 0.10f,
             -3.4f + cosf(t * 0.70f + phase) * 0.20f);
     }
 
-    // Blob shadow — track sprite XZ, scale/fade with height above floor
+    // ---- Blob shadow — track sprite XZ, scale/fade with hover height ------
+
     for (size_t i = 0; i < m_blobActors.size() && i < m_spriteActors.size(); ++i)
     {
-        Entity* blob   = m_blobActors[i];
-        Entity* sprite = m_spriteActors[i];
-        if (!blob || !sprite)
-            continue;
+        TransformComp* sprXf  = m_world.transforms.Get(m_spriteActors[i]);
+        TransformComp* blobXf = m_world.transforms.Get(m_blobActors[i]);
+        RenderComp*    blobRnd = m_world.renders.Get(m_blobActors[i]);
+        if (!sprXf || !blobXf || !blobRnd) continue;
 
-        // sprite scale Y = 1.5, so sprite bottom = center.y - 0.75
-        const float spriteBottomY    = sprite->transform.position.y - 0.75f;
-        const float heightAboveFloor = spriteBottomY - (-1.0f); // 0 when touching floor
-
-        // blob gets darker and smaller the closer the sprite is to the floor
+        const float spriteBottomY    = sprXf->transform.position.y - 0.75f;
+        const float heightAboveFloor = spriteBottomY - (-1.0f);
         const float blobAlpha = std::max(0.15f, 0.75f - heightAboveFloor * 2.0f);
         const float blobScale = 0.7f + heightAboveFloor * 2.0f;
 
-        blob->transform.SetPosition(sprite->transform.position.x, -0.999f, sprite->transform.position.z);
-        blob->transform.SetScale(blobScale, 1.0f, blobScale);
-        blob->tint.w = blobAlpha;
+        blobXf->transform.SetPosition(sprXf->transform.position.x, -0.999f, sprXf->transform.position.z);
+        blobXf->transform.SetScale(blobScale, 1.0f, blobScale);
+        blobRnd->tint.w = blobAlpha;
     }
 
-    // Sprite frame animation (original 3)
-    for (Entity* sprite : m_spriteActors)
-    {
-        if (!sprite || sprite->animFrames.empty())
-            continue;
+    // ---- Sprite frame animation --------------------------------------------
 
-        sprite->animTimer += dt;
-        const int frameIndex = static_cast<int>(sprite->animTimer * sprite->animSpeed)
-                               % static_cast<int>(sprite->animFrames.size());
-        sprite->spriteUVRect = sprite->animFrames[frameIndex];
-    }
+    auto TickAnim = [&](EntityID id) {
+        SpriteComp* spr = m_world.sprites.Get(id);
+        if (!spr || spr->animFrames.empty()) return;
+        spr->animTimer += dt;
+        const int frame = static_cast<int>(spr->animTimer * spr->animSpeed)
+                          % static_cast<int>(spr->animFrames.size());
+        spr->uvRect = spr->animFrames[frame];
+    };
+    for (EntityID id : m_spriteActors)    TickAnim(id);
+    for (EntityID id : m_bulkSpriteActors) TickAnim(id);
 
-    // Bulk sprite frame animation (hover Y is now computed per-vertex on GPU)
-    for (Entity* sprite : m_bulkSpriteActors)
-    {
-        if (!sprite || sprite->animFrames.empty())
-            continue;
+    // ---- Meteor spawn on left-click ----------------------------------------
 
-        sprite->animTimer += dt;
-        const int frameIndex = static_cast<int>(sprite->animTimer * sprite->animSpeed)
-                               % static_cast<int>(sprite->animFrames.size());
-        sprite->spriteUVRect = sprite->animFrames[frameIndex];
-    }
-
-    // Left-click casts a volley of meteors aimed at the targeting ring position
     if (input.leftMouseClick && m_hasTarget && m_sphereMesh)
     {
         auto MRng = [this]() -> float {
@@ -580,40 +578,44 @@ void Game::Update(float dt, const InputState& input)
             return static_cast<float>(m_meteorRng >> 16) / 65535.0f;
         };
 
-        const int count = 3 + static_cast<int>(MRng() * 3.0f); // 3–5
+        const int count = 3 + static_cast<int>(MRng() * 3.0f);
         for (int i = 0; i < count; ++i)
         {
             const float dx   = (MRng() - 0.5f) * kTargetRadius * 2.0f;
             const float dz   = (MRng() - 0.5f) * kTargetRadius * 2.0f;
             const float size = 0.55f + MRng() * 0.55f;
 
-            Entity& meteor = m_scene.CreateEntity();
-            meteor.mesh                 = m_sphereMesh;
-            meteor.material             = m_material;
-            meteor.castsProjectedShadow = true;
-            meteor.transform.SetPosition(m_targetPos.x + dx, 22.0f, m_targetPos.z + dz);
-            meteor.transform.SetScale(size, size, size);
-            meteor.tint     = vec4(1.0f, 0.12f + MRng() * 0.18f, 0.02f, 1.0f);
-            meteor.velocity = vec3((MRng() - 0.5f) * 2.5f, -8.0f, (MRng() - 0.5f) * 2.5f);
-            m_meteorActors.push_back(&meteor);
+            EntityID id = m_world.CreateEntity();
+            auto& xf = m_world.transforms.Add(id);
+            xf.transform.SetPosition(m_targetPos.x + dx, 22.0f, m_targetPos.z + dz);
+            xf.transform.SetScale(size, size, size);
+            auto& rnd = m_world.renders.Add(id);
+            rnd.mesh                  = m_sphereMesh;
+            rnd.material              = m_material;
+            rnd.castsProjectedShadow  = true;
+            rnd.tint = vec4(1.0f, 0.12f + MRng() * 0.18f, 0.02f, 1.0f);
+            m_world.physics.Add(id, PhysicsComp{
+                vec3((MRng() - 0.5f) * 2.5f, -8.0f, (MRng() - 0.5f) * 2.5f) });
+            m_meteorActors.push_back(id);
         }
     }
 
-    // Meteor physics — gravity + removal when below floor
-    constexpr float kMeteorGravity = 20.0f;
-    for (Entity* meteor : m_meteorActors)
-    {
-        meteor->velocity.y -= kMeteorGravity * dt;
-        meteor->transform.position.x += meteor->velocity.x * dt;
-        meteor->transform.position.y += meteor->velocity.y * dt;
-        meteor->transform.position.z += meteor->velocity.z * dt;
-    }
+    // ---- Meteor physics + fire trail ---------------------------------------
 
-    // Emit fire trail particles from each falling meteor
-    for (const Entity* meteor : m_meteorActors)
+    constexpr float kMeteorGravity = 20.0f;
+    for (EntityID id : m_meteorActors)
     {
-        const vec3& mp         = meteor->transform.position;
-        const float meteorSize = meteor->transform.scale.x;
+        PhysicsComp*   phys = m_world.physics.Get(id);
+        TransformComp* xf   = m_world.transforms.Get(id);
+        if (!phys || !xf) continue;
+        phys->velocity.y -= kMeteorGravity * dt;
+        xf->transform.position.x += phys->velocity.x * dt;
+        xf->transform.position.y += phys->velocity.y * dt;
+        xf->transform.position.z += phys->velocity.z * dt;
+
+        // Fire trail particles
+        const vec3& mp         = xf->transform.position;
+        const float meteorSize = xf->transform.scale.x;
         for (int k = 0; k < 3; ++k)
         {
             m_fireParticles.push_back({
@@ -630,189 +632,231 @@ void Game::Update(float dt, const InputState& input)
         }
     }
 
-    // Collect meteors that have hit the floor (explicit pass — do NOT rely on remove_if tail)
-    std::vector<Entity*> meteorToDestroy;
-    for (Entity* e : m_meteorActors)
-        if (e->transform.position.y < -1.0f)
-            meteorToDestroy.push_back(e);
+    // ---- Meteor impact detection + explosion spawn -------------------------
+
+    std::vector<EntityID> meteorToDestroy;
+    for (EntityID id : m_meteorActors)
+    {
+        TransformComp* xf = m_world.transforms.Get(id);
+        if (xf && xf->transform.position.y < -1.0f)
+            meteorToDestroy.push_back(id);
+    }
 
     if (!meteorToDestroy.empty())
     {
-        // Spawn an explosion at each impact site
-        for (Entity* meteor : meteorToDestroy)
+        for (EntityID id : meteorToDestroy)
         {
-            const float cx        = meteor->transform.position.x;
-            const float cz        = meteor->transform.position.z;
-            const float maxRadius = 1.8f + meteor->transform.scale.x * 2.0f;
+            TransformComp* xf = m_world.transforms.Get(id);
+            if (!xf) continue;
+            const float cx        = xf->transform.position.x;
+            const float cz        = xf->transform.position.z;
+            const float maxRadius = 1.8f + xf->transform.scale.x * 2.0f;
 
-            Entity& expl = m_scene.CreateEntity();
-            expl.mesh                 = m_sphereMesh;
-            expl.material             = m_material;
-            expl.castsProjectedShadow = false;
-            expl.transform.SetPosition(cx, -1.0f, cz);
-            expl.transform.SetScale(0.01f, 0.01f, 0.01f);
-            expl.tint = vec4(1.0f, 0.6f, 0.0f, 1.0f);
-            m_explosions.push_back({ &expl, vec3(cx, -1.0f, cz), 0.0f, 1.0f, maxRadius });
+            EntityID expl = m_world.CreateEntity();
+            auto& exXf = m_world.transforms.Add(expl);
+            exXf.transform.SetPosition(cx, -1.0f, cz);
+            exXf.transform.SetScale(0.01f, 0.01f, 0.01f);
+            auto& exRnd = m_world.renders.Add(expl);
+            exRnd.mesh                  = m_sphereMesh;
+            exRnd.material              = m_material;
+            exRnd.castsProjectedShadow  = false;
+            exRnd.tint                  = vec4(1.0f, 0.6f, 0.0f, 1.0f);
+            m_explosions.push_back({ expl, vec3(cx, -1.0f, cz), 0.0f, 1.0f, maxRadius });
         }
 
-        // Remove from tracking list using the collected set as the predicate
         m_meteorActors.erase(
             std::remove_if(m_meteorActors.begin(), m_meteorActors.end(),
-                [&meteorToDestroy](Entity* e) {
-                    return std::find(meteorToDestroy.begin(), meteorToDestroy.end(), e) != meteorToDestroy.end();
+                [&meteorToDestroy](EntityID id) {
+                    return std::find(meteorToDestroy.begin(), meteorToDestroy.end(), id) != meteorToDestroy.end();
                 }),
             m_meteorActors.end());
 
-        // Remove from scene
-        auto& ents = m_scene.GetEntities();
-        ents.erase(
-            std::remove_if(ents.begin(), ents.end(),
-                [&meteorToDestroy](const std::unique_ptr<Entity>& e) {
-                    return std::find(meteorToDestroy.begin(), meteorToDestroy.end(), e.get()) != meteorToDestroy.end();
-                }),
-            ents.end());
+        for (EntityID id : meteorToDestroy)
+            m_world.DestroyEntity(id);
     }
 
-    // Cubes are temporarily hidden by explosions — restore each frame so the effect is transient.
-    // Sprites are permanently killed — they are NOT re-enabled here.
-    for (Entity* e : m_cubeActors) if (e) e->enabled = true;
+    // ---- Re-enable cubes each frame (transient hide during explosions) -----
 
-    // Update each explosion: advance age, resize sphere, recolour, disable overlapping entities
+    for (EntityID id : m_cubeActors)
+    {
+        RenderComp* rnd = m_world.renders.Get(id);
+        if (rnd) rnd->visible = true;
+    }
+
+    // ---- Explosion update --------------------------------------------------
+
     for (auto& expl : m_explosions)
     {
         expl.age += dt;
-        const float progress     = std::min(expl.age / expl.maxAge, 1.0f);
-        const float easedT       = 1.0f - (1.0f - progress) * (1.0f - progress); // ease-out
-        const float radius       = expl.maxRadius * easedT;
-        const float diameter     = radius * 2.0f;
-        expl.sphere->transform.SetScale(diameter, diameter, diameter);
-        expl.sphere->tint = vec4(1.0f, 0.6f * (1.0f - progress), 0.0f, 1.0f); // orange → red
+        const float progress = std::min(expl.age / expl.maxAge, 1.0f);
+        const float easedT   = 1.0f - (1.0f - progress) * (1.0f - progress);
+        const float radius   = expl.maxRadius * easedT;
+        const float diameter = radius * 2.0f;
 
-        const float r2 = radius * radius;
-        auto disableIfInside = [&](Entity* e) {
-            if (!e) return;
-            const vec3& p = e->transform.position;
+        TransformComp* exXf  = m_world.transforms.Get(expl.sphere);
+        RenderComp*    exRnd = m_world.renders.Get(expl.sphere);
+        if (exXf)  exXf->transform.SetScale(diameter, diameter, diameter);
+        if (exRnd) exRnd->tint = vec4(1.0f, 0.6f * (1.0f - progress), 0.0f, 1.0f);
+
+        const float r2       = radius * radius;
+        const float scorchR2 = (radius * 1.8f) * (radius * 1.8f);
+
+        auto disableIfInside = [&](EntityID id) {
+            TransformComp* xf  = m_world.transforms.Get(id);
+            RenderComp*    rnd = m_world.renders.Get(id);
+            if (!xf || !rnd || !rnd->visible) return;
+            const vec3& p  = xf->transform.position;
             const float dx = p.x - expl.center.x;
             const float dy = p.y - expl.center.y;
             const float dz = p.z - expl.center.z;
-            if (dx*dx + dy*dy + dz*dz < r2)
-                e->enabled = false;
+            if (dx*dx + dy*dy + dz*dz < r2) rnd->visible = false;
         };
+        for (EntityID id : m_cubeActors)       disableIfInside(id);
+        for (EntityID id : m_spriteActors)     disableIfInside(id);
+        for (EntityID id : m_bulkSpriteActors) disableIfInside(id);
 
-        for (Entity* e : m_cubeActors)       disableIfInside(e);
-        for (Entity* e : m_spriteActors)     disableIfInside(e);
-        for (Entity* e : m_bulkSpriteActors) disableIfInside(e);
-
-        // Scorch ring: sprites between kill radius and 1.8× start burning
-        const float scorchR2 = (radius * 1.8f) * (radius * 1.8f);
-        auto startBurning = [&](Entity* e) {
-            if (!e || !e->enabled || e->isBurning) return;
-            const vec3& p = e->transform.position;
+        auto startBurning = [&](EntityID id) {
+            if (m_world.burning.Has(id)) return;
+            TransformComp* xf  = m_world.transforms.Get(id);
+            RenderComp*    rnd = m_world.renders.Get(id);
+            if (!xf || !rnd || !rnd->visible) return;
+            const vec3& p  = xf->transform.position;
             const float dx = p.x - expl.center.x;
             const float dy = p.y - expl.center.y;
             const float dz = p.z - expl.center.z;
             const float d2 = dx*dx + dy*dy + dz*dz;
-            if (d2 > r2 && d2 < scorchR2) {
-                e->isBurning = true;
-
-                // Ragdoll impulse — direction away from explosion, random upward arc
+            if (d2 > r2 && d2 < scorchR2)
+            {
                 const float dist = sqrtf(d2);
                 float nx = 0.0f, nz = 1.0f;
                 if (dist > 0.001f) { nx = dx / dist; nz = dz / dist; }
                 const float hSpeed = 2.5f + PRng() * 4.0f;
-                const vec3  impulse = { nx * hSpeed, 3.5f + PRng() * 4.5f, nz * hSpeed };
-
-                m_burningSprites.push_back({ e, 0.0f, 1.2f + PRng() * 0.8f, e->tint, impulse });
+                m_world.burning.Add(id, BurningComp{ 0.0f, 1.2f + PRng() * 0.8f, rnd->tint });
+                m_world.physics.Add(id, PhysicsComp{
+                    vec3(nx * hSpeed, 3.5f + PRng() * 4.5f, nz * hSpeed) });
             }
         };
-        for (Entity* e : m_spriteActors)     startBurning(e);
-        for (Entity* e : m_bulkSpriteActors) startBurning(e);
+        for (EntityID id : m_spriteActors)     startBurning(id);
+        for (EntityID id : m_bulkSpriteActors) startBurning(id);
     }
 
-    // Blob shadows mirror their sprite's visibility
-    for (size_t i = 0; i < m_spriteActors.size() && i < m_blobActors.size(); ++i)
-        if (m_spriteActors[i] && !m_spriteActors[i]->enabled && m_blobActors[i])
-            m_blobActors[i]->enabled = false;
+    // ---- Blob shadow tracks sprite visibility -----------------------------
 
-    // Update burning sprites — ragdoll physics, tint shift, particles, kill on burnout
+    for (size_t i = 0; i < m_spriteActors.size() && i < m_blobActors.size(); ++i)
+    {
+        RenderComp* sprRnd  = m_world.renders.Get(m_spriteActors[i]);
+        RenderComp* blobRnd = m_world.renders.Get(m_blobActors[i]);
+        if (sprRnd && !sprRnd->visible && blobRnd)
+            blobRnd->visible = false;
+    }
+
+    // ---- Burning sprite update (BurningComp pool is the source of truth) --
+
     constexpr float kRagdollGravity = 14.0f;
     constexpr float kGroundY        = -1.0f;
-    for (auto& bs : m_burningSprites)
+
+    std::vector<EntityID> burnDone;
+    const size_t burnCount = m_world.burning.Size(); // snapshot before loop
+    for (size_t i = 0; i < burnCount; ++i)
     {
-        if (!bs.entity->enabled) { bs.age = bs.duration; continue; } // already kill-zoned
-        bs.age += dt;
+        EntityID    id = m_world.burning.IdAt(i);
+        BurningComp& bc = m_world.burning.DataAt(i);
+        RenderComp*    rnd = m_world.renders.Get(id);
 
-        // Ragdoll — apply gravity and integrate position
-        bs.velocity.y -= kRagdollGravity * dt;
-        vec3& pos = bs.entity->transform.position;
-        pos.x += bs.velocity.x * dt;
-        pos.y += bs.velocity.y * dt;
-        pos.z += bs.velocity.z * dt;
-
-        // Bounce on ground with energy loss
-        if (pos.y < kGroundY)
+        if (!rnd || !rnd->visible) { bc.age = bc.duration; }
+        else
         {
-            pos.y          = kGroundY;
-            bs.velocity.y  = -bs.velocity.y * 0.28f;
-            bs.velocity.x *= 0.55f;
-            bs.velocity.z *= 0.55f;
-        }
+            bc.age += dt;
 
-        const float bt = bs.age / bs.duration;
+            // Ragdoll physics
+            PhysicsComp*   phys = m_world.physics.Get(id);
+            TransformComp* xf   = m_world.transforms.Get(id);
+            if (phys && xf)
+            {
+                phys->velocity.y -= kRagdollGravity * dt;
+                vec3& pos = xf->transform.position;
+                pos.x += phys->velocity.x * dt;
+                pos.y += phys->velocity.y * dt;
+                pos.z += phys->velocity.z * dt;
+                if (pos.y < kGroundY)
+                {
+                    pos.y           = kGroundY;
+                    phys->velocity.y  = -phys->velocity.y * 0.28f;
+                    phys->velocity.x *= 0.55f;
+                    phys->velocity.z *= 0.55f;
+                }
+            }
 
-        if (bt < 0.45f) {
-            const float u = bt / 0.45f;
-            bs.entity->tint = vec4(
-                bs.origTint.x + (1.0f - bs.origTint.x) * u,
-                bs.origTint.y * (1.0f - u) + 0.25f * u,
-                bs.origTint.z * (1.0f - u),
-                1.0f);
-        } else {
-            const float u = (bt - 0.45f) / 0.55f;
-            bs.entity->tint = vec4(1.0f - u * 0.85f, 0.25f * (1.0f - u), 0.0f, 1.0f);
-        }
+            // Tint shift from original colour to fire colour
+            const float bt = bc.age / bc.duration;
+            if (bt < 0.45f) {
+                const float u = bt / 0.45f;
+                rnd->tint = vec4(
+                    bc.origTint.x + (1.0f - bc.origTint.x) * u,
+                    bc.origTint.y * (1.0f - u) + 0.25f * u,
+                    bc.origTint.z * (1.0f - u),
+                    1.0f);
+            } else {
+                const float u = (bt - 0.45f) / 0.55f;
+                rnd->tint = vec4(1.0f - u * 0.85f, 0.25f * (1.0f - u), 0.0f, 1.0f);
+            }
 
-        if (PRng() < 0.65f) {
-            const vec3& sp = bs.entity->transform.position;
-            m_fireParticles.push_back({
-                vec3(sp.x + (PRng()-0.5f)*0.4f, sp.y + PRng()*0.5f, sp.z + (PRng()-0.5f)*0.4f),
-                vec3((PRng()-0.5f)*0.5f, 0.9f + PRng()*1.4f, (PRng()-0.5f)*0.5f),
-                0.0f,
-                0.35f + PRng() * 0.2f,
-                0.05f + PRng() * 0.05f
-            });
-        }
+            // Particle emission
+            if (PRng() < 0.65f && xf)
+            {
+                const vec3& sp = xf->transform.position;
+                m_fireParticles.push_back({
+                    vec3(sp.x + (PRng()-0.5f)*0.4f, sp.y + PRng()*0.5f, sp.z + (PRng()-0.5f)*0.4f),
+                    vec3((PRng()-0.5f)*0.5f, 0.9f + PRng()*1.4f, (PRng()-0.5f)*0.5f),
+                    0.0f,
+                    0.35f + PRng() * 0.2f,
+                    0.05f + PRng() * 0.05f
+                });
+            }
 
-        if (bs.age >= bs.duration) {
-            bs.entity->enabled = false;
-            for (size_t si = 0; si < m_spriteActors.size() && si < m_blobActors.size(); ++si)
-                if (m_spriteActors[si] == bs.entity && m_blobActors[si])
-                    m_blobActors[si]->enabled = false;
+            // Kill on burnout
+            if (bc.age >= bc.duration)
+            {
+                rnd->visible = false;
+                // Sync blob shadow with its sprite
+                for (size_t si = 0; si < m_spriteActors.size() && si < m_blobActors.size(); ++si)
+                {
+                    if (m_spriteActors[si] == id)
+                    {
+                        RenderComp* blobRnd = m_world.renders.Get(m_blobActors[si]);
+                        if (blobRnd) blobRnd->visible = false;
+                    }
+                }
+                burnDone.push_back(id);
+            }
         }
     }
-    m_burningSprites.erase(
-        std::remove_if(m_burningSprites.begin(), m_burningSprites.end(),
-            [](const BurningSprite& bs) { return bs.age >= bs.duration; }),
-        m_burningSprites.end());
+    for (EntityID id : burnDone)
+    {
+        m_world.burning.Remove(id);
+        m_world.physics.Remove(id);
+    }
 
-    // Fire particle physics — rise with slight deceleration, age out
+    // ---- Fire particle physics --------------------------------------------
+
     for (auto& fp : m_fireParticles)
     {
-        fp.vel.y   = std::max(fp.vel.y - 2.5f * dt, 0.15f);
-        fp.pos.x  += fp.vel.x * dt;
-        fp.pos.y  += fp.vel.y * dt;
-        fp.pos.z  += fp.vel.z * dt;
-        fp.age    += dt;
+        fp.vel.y  = std::max(fp.vel.y - 2.5f * dt, 0.15f);
+        fp.pos.x += fp.vel.x * dt;
+        fp.pos.y += fp.vel.y * dt;
+        fp.pos.z += fp.vel.z * dt;
+        fp.age   += dt;
     }
     m_fireParticles.erase(
         std::remove_if(m_fireParticles.begin(), m_fireParticles.end(),
             [](const FireParticle& fp) { return fp.age >= fp.maxAge; }),
         m_fireParticles.end());
 
-    // Write shockwaves — one per explosion, active for first 0.65s
+    // ---- Shockwave data (read by DX12Context distort pass) ----------------
+
     {
         constexpr float kShockwaveDuration = 0.65f;
-        auto& waves = m_scene.GetShockwaves();
+        auto& waves = m_world.shockwaves;
         waves.clear();
         for (const auto& expl : m_explosions)
             if (expl.age < kShockwaveDuration)
@@ -820,8 +864,9 @@ void Game::Update(float dt, const InputState& input)
                                   expl.age, kShockwaveDuration });
     }
 
-    // Build scene particle list for the renderer
-    auto& sceneParts = m_scene.GetParticles();
+    // ---- Scene particle list for the renderer -----------------------------
+
+    auto& sceneParts = m_world.particles;
     sceneParts.clear();
     sceneParts.reserve(m_fireParticles.size());
     for (const auto& fp : m_fireParticles)
@@ -834,8 +879,9 @@ void Game::Update(float dt, const InputState& input)
         sceneParts.push_back({ fp.pos.x, fp.pos.y, fp.pos.z, sz, 1.0f, g, b, alpha });
     }
 
-    // Collect finished explosions (explicit pass — do NOT rely on remove_if tail)
-    std::vector<Entity*> explToDestroy;
+    // ---- Finished explosion cleanup ----------------------------------------
+
+    std::vector<EntityID> explToDestroy;
     for (const auto& expl : m_explosions)
         if (expl.age >= expl.maxAge)
             explToDestroy.push_back(expl.sphere);
@@ -846,13 +892,7 @@ void Game::Update(float dt, const InputState& input)
             std::remove_if(m_explosions.begin(), m_explosions.end(),
                 [](const ExplosionData& e) { return e.age >= e.maxAge; }),
             m_explosions.end());
-
-        auto& ents = m_scene.GetEntities();
-        ents.erase(
-            std::remove_if(ents.begin(), ents.end(),
-                [&explToDestroy](const std::unique_ptr<Entity>& e) {
-                    return std::find(explToDestroy.begin(), explToDestroy.end(), e.get()) != explToDestroy.end();
-                }),
-            ents.end());
+        for (EntityID id : explToDestroy)
+            m_world.DestroyEntity(id);
     }
 }

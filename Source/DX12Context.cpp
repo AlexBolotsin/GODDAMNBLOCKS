@@ -1,5 +1,5 @@
 #include "DX12Context.h"
-#include "Scene.h"
+#include "World.h"
 #include "Camera.h"
 #include <algorithm>
 #include <cmath>
@@ -2028,12 +2028,12 @@ void DX12Context::BeginFrame()
     m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 }
 
-void DX12Context::RenderScene(Scene *scene, const Camera &camera)
+void DX12Context::RenderScene(World *world, const Camera &camera)
 {
-    if (!scene)
+    if (!world)
         return;
 
-    m_entityCount   = static_cast<uint32_t>(scene->GetEntities().size());
+    m_entityCount   = static_cast<uint32_t>(world->renders.Size());
     m_drawCallCount = 0;
 
     // ---- Shadow pass -------------------------------------------------------
@@ -2053,27 +2053,32 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
         struct ShadowCB       { mat4 world; mat4 lightVP; };
         struct ShadowSpriteCB { mat4 world; mat4 lightVP; vec4 uvRect; };
 
-        for (auto &entity : scene->GetEntities())
+        for (size_t i = 0; i < world->renders.Size(); ++i)
         {
-            if (!entity || !entity->enabled || !entity->castsProjectedShadow || !entity->mesh)
+            EntityID          id  = world->renders.IdAt(i);
+            const RenderComp& rnd = world->renders.DataAt(i);
+            if (!rnd.visible || !rnd.castsProjectedShadow || !rnd.mesh)
                 continue;
+            const TransformComp* xf = world->transforms.Get(id);
+            if (!xf) continue;
 
-            if (entity->isBillboardActor)
+            if (rnd.isBillboard)
             {
-                if (!entity->material || !entity->material->GetSrvHeap())
+                if (!rnd.material || !rnd.material->GetSrvHeap())
                     continue;
 
                 m_commandList->SetPipelineState(m_shadowSpritePso.Get());
                 m_commandList->SetGraphicsRootSignature(m_shadowSpriteRootSig.Get());
 
-                ID3D12DescriptorHeap* heap = entity->material->GetSrvHeap();
+                ID3D12DescriptorHeap* heap = rnd.material->GetSrvHeap();
                 m_commandList->SetDescriptorHeaps(1, &heap);
                 m_commandList->SetGraphicsRootDescriptorTable(1, heap->GetGPUDescriptorHandleForHeapStart());
 
+                const SpriteComp* spr = world->sprites.Get(id);
                 ShadowSpriteCB scb;
-                scb.world   = MatrixBillboard(entity->transform.position, entity->transform.scale, m_lightPos);
+                scb.world   = MatrixBillboard(xf->transform.position, xf->transform.scale, m_lightPos);
                 scb.lightVP = m_lightViewProj;
-                scb.uvRect  = entity->spriteUVRect;
+                scb.uvRect  = spr ? spr->uvRect : vec4(0.0f, 0.0f, 1.0f, 1.0f);
                 m_commandList->SetGraphicsRoot32BitConstants(0, sizeof(scb) / 4, &scb, 0);
             }
             else
@@ -2082,12 +2087,12 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
                 m_commandList->SetGraphicsRootSignature(m_shadowRootSig.Get());
 
                 ShadowCB cb;
-                cb.world   = entity->transform.GetWorldMatrix();
+                cb.world   = xf->transform.GetWorldMatrix();
                 cb.lightVP = m_lightViewProj;
                 m_commandList->SetGraphicsRoot32BitConstants(0, sizeof(cb) / 4, &cb, 0);
             }
 
-            entity->mesh->Draw(m_commandList.Get());
+            rnd.mesh->Draw(m_commandList.Get());
             ++m_drawCallCount;
         }
 
@@ -2129,7 +2134,7 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
         cbData.proj      = frameData.projMatrix;
         cbData.lightVP   = frameData.lightViewProjMatrix;
         cbData.cameraEye = camera.eye;
-        cbData.time      = scene->GetTime();
+        cbData.time      = world->time;
         memcpy(m_perFrameCbMapped + 256 * m_frameIndex, &cbData, sizeof(cbData));
         frameData.perFrameGpuAddr = m_perFrameCb->GetGPUVirtualAddress() + 256 * m_frameIndex;
 
@@ -2146,53 +2151,76 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
         ExtractFrustumPlanes(MatrixMultiply(frameData.viewMatrix, frameData.projMatrix), frustum);
 
         m_instanceSortBuf.clear();
-        for (auto &entity : scene->GetEntities())
+        for (size_t i = 0; i < world->renders.Size(); ++i)
         {
-            if (!entity || !entity->enabled)
-                continue;
+            EntityID          id  = world->renders.IdAt(i);
+            const RenderComp& rnd = world->renders.DataAt(i);
+            if (!rnd.visible) continue;
+            const TransformComp* xf = world->transforms.Get(id);
+            if (!xf) continue;
 
-            if (entity->useInstancing)
+            if (rnd.isInstanced)
             {
-                // Frustum cull: skip sprites whose centre is outside any plane
-                const vec3& pos = entity->transform.position;
+                const vec3& pos = xf->transform.position;
                 if (!PointInFrustum(frustum, pos.x, pos.y, pos.z))
                     continue;
-
-                // Squared distance for front-to-back sort (no sqrt — only ordering matters)
                 const vec3 d = pos - camera.eye;
-                m_instanceSortBuf.push_back({ d.x*d.x + d.y*d.y + d.z*d.z, entity.get() });
-                if (!instancedMaterial) instancedMaterial = entity->material.get();
+                m_instanceSortBuf.push_back({ d.x*d.x + d.y*d.y + d.z*d.z, id });
+                if (!instancedMaterial) instancedMaterial = rnd.material.get();
                 continue;
             }
 
-            if (entity->isBillboardActor)
+            if (!rnd.mesh || !rnd.material) continue;
+            if (!rnd.material->GetPipelineState() || !rnd.material->GetRootSignature()) continue;
+
+            m_commandList->SetPipelineState(rnd.material->GetPipelineState());
+            m_commandList->SetGraphicsRootSignature(rnd.material->GetRootSignature());
+            if (rnd.material->GetSrvHeap())
             {
-                const mat4 billboardWorld = MatrixBillboard(
-                    entity->transform.position, entity->transform.scale, camera.eye);
-                entity->Draw(m_commandList.Get(), frameData, &billboardWorld, nullptr, false);
-                ++m_drawCallCount;
-                continue;
+                ID3D12DescriptorHeap* heap = rnd.material->GetSrvHeap();
+                m_commandList->SetDescriptorHeaps(1, &heap);
+                m_commandList->SetGraphicsRootDescriptorTable(2, heap->GetGPUDescriptorHandleForHeapStart());
             }
+            m_commandList->SetGraphicsRootConstantBufferView(0, frameData.perFrameGpuAddr);
 
-            entity->Draw(m_commandList.Get(), frameData);
+            struct PerObjectData { mat4 worldMatrix; vec4 color; vec4 renderParams; vec4 spriteUVRect; };
+            PerObjectData pod;
+            pod.color        = rnd.tint;
+            pod.renderParams = vec4(rnd.isBlobShadow ? 1.0f : 0.0f,
+                                    rnd.usesSpriteTexture ? 1.0f : 0.0f,
+                                    rnd.isUnlit ? 1.0f : 0.0f,
+                                    0.0f);
+            const SpriteComp* spr = world->sprites.Get(id);
+            pod.spriteUVRect = spr ? spr->uvRect : vec4(0.0f, 0.0f, 1.0f, 1.0f);
+
+            if (rnd.isBillboard)
+                pod.worldMatrix = MatrixBillboard(xf->transform.position, xf->transform.scale, camera.eye);
+            else
+                pod.worldMatrix = xf->transform.GetWorldMatrix();
+
+            m_commandList->SetGraphicsRoot32BitConstants(1, sizeof(pod) / 4, &pod, 0);
+            rnd.mesh->Draw(m_commandList.Get());
             ++m_drawCallCount;
         }
 
         // Sort front-to-back so early-Z discards distant sprites that are hidden by closer ones
         std::sort(m_instanceSortBuf.begin(), m_instanceSortBuf.end(),
-            [](const std::pair<float, const Entity*>& a,
-               const std::pair<float, const Entity*>& b) { return a.first < b.first; });
+            [](const std::pair<float, EntityID>& a,
+               const std::pair<float, EntityID>& b) { return a.first < b.first; });
 
         instanceCount = static_cast<uint32_t>(
             std::min(m_instanceSortBuf.size(), static_cast<size_t>(kMaxSpriteInstances)));
         for (uint32_t i = 0; i < instanceCount; ++i)
         {
-            const Entity* e = m_instanceSortBuf[i].second;
-            instanceDst[i].world     = MatrixBillboard(
-                e->transform.position, e->transform.scale, camera.eye);
-            instanceDst[i].uvRect    = e->spriteUVRect;
-            instanceDst[i].tint      = e->tint;
-            instanceDst[i].hoverData = vec4(e->hoverPhase, 0.0f, 0.0f, 0.0f);
+            const EntityID       eid = m_instanceSortBuf[i].second;
+            const TransformComp* xf  = world->transforms.Get(eid);
+            const RenderComp*    rnd = world->renders.Get(eid);
+            const SpriteComp*    spr = world->sprites.Get(eid);
+            if (!xf || !rnd) continue;
+            instanceDst[i].world     = MatrixBillboard(xf->transform.position, xf->transform.scale, camera.eye);
+            instanceDst[i].uvRect    = spr ? spr->uvRect : vec4(0.0f, 0.0f, 1.0f, 1.0f);
+            instanceDst[i].tint      = rnd->tint;
+            instanceDst[i].hoverData = vec4(spr ? spr->hoverPhase : 0.0f, 0.0f, 0.0f, 0.0f);
         }
 
         // Single instanced draw replaces the 5000 individual draws
@@ -2223,7 +2251,7 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
 
         // Fire particle pass — additive billboards, depth test on, no depth write
         {
-            const auto&    sceneParts = scene->GetParticles();
+            const auto&    sceneParts = world->particles;
             const uint32_t pCount     = static_cast<uint32_t>(
                 std::min(sceneParts.size(), static_cast<size_t>(kMaxParticles)));
             if (pCount > 0 && m_particlePso && m_particleBuffer)
@@ -2252,7 +2280,7 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
             float swCb[64] = {};
             swCb[1] = aspect;
             uint32_t waveCount = 0;
-            const auto& shockwaves = scene->GetShockwaves();
+            const auto& shockwaves = world->shockwaves;
             for (size_t si = 0; si < shockwaves.size() && waveCount < kMaxShockwaves; ++si)
             {
                 const SceneShockwave& sw = shockwaves[si];

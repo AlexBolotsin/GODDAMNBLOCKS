@@ -19,7 +19,7 @@ namespace
         wchar_t modulePath[MAX_PATH] = {};
         GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
         std::filesystem::path path(modulePath);
-        path = path.parent_path().parent_path().parent_path() / "Sprites" / "19338.png";
+        path = path.parent_path() / "Sprites" / "19338.png";
         return path.wstring();
     }
 }

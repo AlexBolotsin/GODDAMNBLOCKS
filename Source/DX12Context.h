@@ -54,6 +54,7 @@ private:
     bool CreateParticlePipeline();
     bool CreatePostProcessResources();
     bool CreatePostProcessPipelines();
+    bool CreateDistortPipeline();
     void WaitForGpu();
     void MoveToNextFrame();
 
@@ -106,16 +107,22 @@ private:
     uint8_t* m_perFrameCbMapped = nullptr;
 
     // Post-process / HDR / bloom
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_hdrTarget;   // R16G16B16A16_FLOAT, full-res
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_bloomA;      // R16G16B16A16_FLOAT, half-res
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_bloomB;      // R16G16B16A16_FLOAT, half-res
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_postRtvHeap; // 3 RTVs: hdr, bloomA, bloomB
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_postSrvHeap; // 4 SRVs (shader-visible)
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_hdrTarget;      // R16G16B16A16_FLOAT, full-res
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_bloomA;         // R16G16B16A16_FLOAT, half-res
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_bloomB;         // R16G16B16A16_FLOAT, half-res
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_distortTarget;  // R16G16B16A16_FLOAT, full-res
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_postRtvHeap;    // 4 RTVs: hdr, bloomA, bloomB, distort
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_postSrvHeap;    // 5 SRVs (shader-visible)
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_postRootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_brightPassPso;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_blurHPso;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_blurVPso;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_tonemapPso;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_distortRootSig;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_distortPso;
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_shockwaveCb[FrameCount];
+    uint8_t*                                     m_shockwaveCbMapped[FrameCount] = {};
+    static constexpr uint32_t                    kMaxShockwaves = 8;
     uint32_t m_bloomWidth  = 0;
     uint32_t m_bloomHeight = 0;
 

@@ -809,6 +809,17 @@ void Game::Update(float dt, const InputState& input)
             [](const FireParticle& fp) { return fp.age >= fp.maxAge; }),
         m_fireParticles.end());
 
+    // Write shockwaves — one per explosion, active for first 0.65s
+    {
+        constexpr float kShockwaveDuration = 0.65f;
+        auto& waves = m_scene.GetShockwaves();
+        waves.clear();
+        for (const auto& expl : m_explosions)
+            if (expl.age < kShockwaveDuration)
+                waves.push_back({ expl.center.x, expl.center.y, expl.center.z,
+                                  expl.age, kShockwaveDuration });
+    }
+
     // Build scene particle list for the renderer
     auto& sceneParts = m_scene.GetParticles();
     sceneParts.clear();

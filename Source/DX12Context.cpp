@@ -250,6 +250,12 @@ bool DX12Context::Init(HWND hwnd, uint32_t width, uint32_t height)
         return false;
     }
 
+    if (!CreateDistortPipeline())
+    {
+        OutputDebugStringA("DX12Context::Init failed in CreateDistortPipeline\n");
+        return false;
+    }
+
     // Per-frame constant buffer: view + proj + lightViewProj (48 floats, 256-byte aligned per frame)
     {
         D3D12_HEAP_PROPERTIES uploadHeap = {};
@@ -1403,6 +1409,7 @@ bool DX12Context::CreatePostProcessResources()
     m_hdrTarget.Reset();
     m_bloomA.Reset();
     m_bloomB.Reset();
+    m_distortTarget.Reset();
     m_postRtvHeap.Reset();
     m_postSrvHeap.Reset();
 
@@ -1439,30 +1446,37 @@ bool DX12Context::CreatePostProcessResources()
         return true;
     };
 
-    if (!Create(hdrDesc,   m_hdrTarget, L"HDR Target")) return false;
-    if (!Create(bloomDesc, m_bloomA,    L"Bloom A"))    return false;
-    if (!Create(bloomDesc, m_bloomB,    L"Bloom B"))    return false;
+    if (!Create(hdrDesc,   m_hdrTarget,    L"HDR Target"))    return false;
+    if (!Create(bloomDesc, m_bloomA,        L"Bloom A"))       return false;
+    if (!Create(bloomDesc, m_bloomB,        L"Bloom B"))       return false;
+    if (!Create(hdrDesc,   m_distortTarget, L"Distort Target")) return false;
 
-    // Post-process RTV heap (3 descriptors)
+    // Post-process RTV heap (4 descriptors: hdr, bloomA, bloomB, distort)
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd = {};
         hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        hd.NumDescriptors = 3;
+        hd.NumDescriptors = 4;
         if (FAILED(m_device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_postRtvHeap))))
             return false;
 
         const UINT sz = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_postRtvHeap->GetCPUDescriptorHandleForHeapStart();
-        m_device->CreateRenderTargetView(m_hdrTarget.Get(), nullptr, h); h.ptr += sz;
-        m_device->CreateRenderTargetView(m_bloomA.Get(),    nullptr, h); h.ptr += sz;
-        m_device->CreateRenderTargetView(m_bloomB.Get(),    nullptr, h);
+        m_device->CreateRenderTargetView(m_hdrTarget.Get(),    nullptr, h); h.ptr += sz; // [0] hdr
+        m_device->CreateRenderTargetView(m_bloomA.Get(),       nullptr, h); h.ptr += sz; // [1] bloomA
+        m_device->CreateRenderTargetView(m_bloomB.Get(),       nullptr, h); h.ptr += sz; // [2] bloomB
+        m_device->CreateRenderTargetView(m_distortTarget.Get(),nullptr, h);              // [3] distort
     }
 
-    // Post-process SRV heap (4 slots: hdr, bloomA, bloomB, hdr-duplicate for safe t1 on blur passes)
+    // Post-process SRV heap (5 slots):
+    //   [0]=HDR      bright-pass t0, distort input t0
+    //   [1]=bloomA   blur-H t0
+    //   [2]=bloomB   blur-V t0
+    //   [3]=distort  tonemap t0
+    //   [4]=bloomA   tonemap t1 (paired with [3] for contiguous table)
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd = {};
         hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        hd.NumDescriptors = 4;
+        hd.NumDescriptors = 5;
         hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(m_device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_postSrvHeap))))
             return false;
@@ -1476,10 +1490,11 @@ bool DX12Context::CreatePostProcessResources()
         srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Texture2D.MipLevels     = 1;
 
-        m_device->CreateShaderResourceView(m_hdrTarget.Get(), &srvDesc, h); h.ptr += sz; // slot 0: HDR
-        m_device->CreateShaderResourceView(m_bloomA.Get(),    &srvDesc, h); h.ptr += sz; // slot 1: bloomA
-        m_device->CreateShaderResourceView(m_bloomB.Get(),    &srvDesc, h); h.ptr += sz; // slot 2: bloomB
-        m_device->CreateShaderResourceView(m_hdrTarget.Get(), &srvDesc, h);              // slot 3: HDR dup (safe t1 for blur-V)
+        m_device->CreateShaderResourceView(m_hdrTarget.Get(),    &srvDesc, h); h.ptr += sz; // [0] HDR
+        m_device->CreateShaderResourceView(m_bloomA.Get(),       &srvDesc, h); h.ptr += sz; // [1] bloomA
+        m_device->CreateShaderResourceView(m_bloomB.Get(),       &srvDesc, h); h.ptr += sz; // [2] bloomB
+        m_device->CreateShaderResourceView(m_distortTarget.Get(),&srvDesc, h); h.ptr += sz; // [3] distort
+        m_device->CreateShaderResourceView(m_bloomA.Get(),       &srvDesc, h);              // [4] bloomA dup (tonemap t1)
     }
 
     return true;
@@ -1740,6 +1755,171 @@ float4 PS_Tonemap(PSInput i) : SV_TARGET
     pso.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     pso.PS = { tmBlob->GetBufferPointer(), tmBlob->GetBufferSize() };
     if (FAILED(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_tonemapPso)))) return false;
+
+    return true;
+}
+
+bool DX12Context::CreateDistortPipeline()
+{
+    // Shockwave data constant buffer layout — must be exactly 256 bytes (D3D12 CB minimum)
+    // float waveCount, float aspect, float[2] pad, float[8][4] waves, float[28] fill
+    static_assert(4 + 4 + 8 + 8*16 + 28*4 == 256, "ShockwaveCB size");
+
+    static const char* kShader = R"(
+struct PSInput { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+
+cbuffer ShockwaveCB : register(b0)
+{
+    float  waveCount;
+    float  aspect;
+    float2 _pad0;
+    float4 waves[8]; // .xy=screenUV center  .z=ring radius(0..1)  .w=strength
+};
+
+Texture2D    hdrInput  : register(t0);
+SamplerState linearSmp : register(s0);
+
+PSInput VSMain(uint vid : SV_VertexID)
+{
+    float2 p = float2((vid == 1) ? 3.0f : -1.0f, (vid == 2) ? -3.0f : 1.0f);
+    PSInput o;
+    o.pos = float4(p, 0.0f, 1.0f);
+    o.uv  = float2(p.x * 0.5f + 0.5f, p.y * -0.5f + 0.5f);
+    return o;
+}
+
+float4 PS_Distort(PSInput i) : SV_TARGET
+{
+    const int MAX_WAVES = 8;
+    int count = min((int)waveCount, MAX_WAVES);
+
+    float2 totalOffset = float2(0.0f, 0.0f);
+    [loop]
+    for (int w = 0; w < count; ++w)
+    {
+        float2 center   = waves[w].xy;
+        float  radius   = waves[w].z;
+        float  strength = waves[w].w;
+
+        // Correct for aspect ratio so the ring is circular on screen
+        float2 delta = i.uv - center;
+        delta.x *= aspect;
+        float  dist = length(delta);
+
+        const float kRingWidth = 0.032f;
+        float  ring = max(0.0f, 1.0f - abs(dist - radius) / kRingWidth);
+        ring = ring * ring; // sharpen leading edge
+
+        // Direction back in UV space
+        float2 dir = (dist > 0.0001f) ? (delta / dist) : float2(1.0f, 0.0f);
+        dir.x /= aspect;
+        totalOffset += dir * ring * strength;
+    }
+
+    return float4(hdrInput.Sample(linearSmp, i.uv + totalOffset).rgb, 1.0f);
+}
+)";
+
+    UINT flags = 0;
+#if defined(_DEBUG)
+    flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+
+    Microsoft::WRL::ComPtr<ID3DBlob> vsBlob, psBlob, errBlob;
+    auto Compile = [&](LPCSTR entry, LPCSTR target, Microsoft::WRL::ComPtr<ID3DBlob>& out) -> bool {
+        errBlob.Reset();
+        HRESULT hr = D3DCompile(kShader, strlen(kShader), nullptr, nullptr, nullptr,
+                                entry, target, flags, 0, &out, &errBlob);
+        if (FAILED(hr)) {
+            if (errBlob) OutputDebugStringA(static_cast<const char*>(errBlob->GetBufferPointer()));
+            return false;
+        }
+        return true;
+    };
+    if (!Compile("VSMain",     "vs_5_0", vsBlob)) { OutputDebugStringA("[Distort] VS compile failed\n"); return false; }
+    if (!Compile("PS_Distort", "ps_5_0", psBlob)) { OutputDebugStringA("[Distort] PS compile failed\n"); return false; }
+
+    // Root signature: param0=root CBV (b0, shockwave data), param1=descriptor table (1 SRV t0)
+    D3D12_DESCRIPTOR_RANGE srvRange = {};
+    srvRange.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors     = 1;
+    srvRange.BaseShaderRegister = 0;
+    srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER params[2] = {};
+    params[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    params[0].Descriptor.ShaderRegister = 0;
+    params[0].ShaderVisibility          = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[1].DescriptorTable.NumDescriptorRanges = 1;
+    params[1].DescriptorTable.pDescriptorRanges   = &srvRange;
+    params[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC samp = {};
+    samp.Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samp.ComparisonFunc   = D3D12_COMPARISON_FUNC_ALWAYS;
+    samp.MaxLOD           = D3D12_FLOAT32_MAX;
+    samp.ShaderRegister   = 0;
+    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC sigDesc = {};
+    sigDesc.NumParameters     = 2;
+    sigDesc.pParameters       = params;
+    sigDesc.NumStaticSamplers = 1;
+    sigDesc.pStaticSamplers   = &samp;
+
+    Microsoft::WRL::ComPtr<ID3DBlob> sigBlob;
+    if (FAILED(D3D12SerializeRootSignature(&sigDesc, D3D_ROOT_SIGNATURE_VERSION_1, &sigBlob, &errBlob))) {
+        if (errBlob) OutputDebugStringA(static_cast<const char*>(errBlob->GetBufferPointer()));
+        return false;
+    }
+    if (FAILED(m_device->CreateRootSignature(0, sigBlob->GetBufferPointer(),
+                                             sigBlob->GetBufferSize(),
+                                             IID_PPV_ARGS(&m_distortRootSig))))
+        return false;
+
+    // PSO — full-res R16G16B16A16_FLOAT output, no depth
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = m_distortRootSig.Get();
+    pso.VS             = { vsBlob->GetBufferPointer(), vsBlob->GetBufferSize() };
+    pso.PS             = { psBlob->GetBufferPointer(), psBlob->GetBufferSize() };
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.SampleMask                      = UINT_MAX;
+    pso.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = FALSE;
+    pso.DepthStencilState.DepthEnable   = FALSE;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets      = 1;
+    pso.RTVFormats[0]         = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    pso.SampleDesc.Count      = 1;
+    if (FAILED(m_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_distortPso))))
+        return false;
+
+    // Double-buffered upload CBs for shockwave data (256 bytes each)
+    D3D12_HEAP_PROPERTIES uploadHeap = {};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC cbDesc = {};
+    cbDesc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+    cbDesc.Width            = 256;
+    cbDesc.Height           = 1;
+    cbDesc.DepthOrArraySize = 1;
+    cbDesc.MipLevels        = 1;
+    cbDesc.SampleDesc.Count = 1;
+    cbDesc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    for (uint32_t f = 0; f < FrameCount; ++f)
+    {
+        if (FAILED(m_device->CreateCommittedResource(
+                &uploadHeap, D3D12_HEAP_FLAG_NONE, &cbDesc,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                IID_PPV_ARGS(&m_shockwaveCb[f]))))
+            return false;
+        m_shockwaveCb[f]->Map(0, nullptr, reinterpret_cast<void**>(&m_shockwaveCbMapped[f]));
+        ZeroMemory(m_shockwaveCbMapped[f], 256);
+    }
 
     return true;
 }
@@ -2064,6 +2244,37 @@ void DX12Context::RenderScene(Scene *scene, const Camera &camera)
                 ++m_drawCallCount;
             }
         }
+
+        // Pre-fill shockwave CB for the distort pass in EndFrame
+        // CB layout (256 bytes = 64 floats): [0]=count [1]=aspect [2..3]=pad [4..N]=waves(cx,cy,r,s)
+        {
+            const mat4 viewProj = MatrixMultiply(frameData.viewMatrix, frameData.projMatrix);
+            float swCb[64] = {};
+            swCb[1] = aspect;
+            uint32_t waveCount = 0;
+            const auto& shockwaves = scene->GetShockwaves();
+            for (size_t si = 0; si < shockwaves.size() && waveCount < kMaxShockwaves; ++si)
+            {
+                const SceneShockwave& sw = shockwaves[si];
+                const float wx = sw.x, wy = sw.y, wz = sw.z;
+                const float clipX = wx*viewProj.m[0]+wy*viewProj.m[4]+wz*viewProj.m[8] +viewProj.m[12];
+                const float clipY = wx*viewProj.m[1]+wy*viewProj.m[5]+wz*viewProj.m[9] +viewProj.m[13];
+                const float clipW = wx*viewProj.m[3]+wy*viewProj.m[7]+wz*viewProj.m[11]+viewProj.m[15];
+                if (clipW <= 0.0f) continue;
+                const float ndcX = clipX / clipW;
+                const float ndcY = clipY / clipW;
+                if (ndcX < -1.5f || ndcX > 1.5f || ndcY < -1.5f || ndcY > 1.5f) continue;
+                const float t = sw.age / sw.maxAge;
+                const uint32_t base = 4 + waveCount * 4;
+                swCb[base + 0] = ndcX * 0.5f + 0.5f;
+                swCb[base + 1] = 1.0f - (ndcY * 0.5f + 0.5f);
+                swCb[base + 2] = t * 0.85f;
+                swCb[base + 3] = 0.025f * (1.0f - t * t);
+                ++waveCount;
+            }
+            swCb[0] = static_cast<float>(waveCount);
+            memcpy(m_shockwaveCbMapped[m_frameIndex], swCb, sizeof(swCb));
+        }
     }
 
     // Restore shadow map to DEPTH_WRITE so next frame's shadow pass can clear it without a barrier
@@ -2095,13 +2306,16 @@ void DX12Context::EndFrame()
     const UINT rtvSz = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     const UINT srvSz = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-    D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv   = m_postRtvHeap->GetCPUDescriptorHandleForHeapStart();
-    D3D12_CPU_DESCRIPTOR_HANDLE bloomARtv = { hdrRtv.ptr + rtvSz };
-    D3D12_CPU_DESCRIPTOR_HANDLE bloomBRtv = { hdrRtv.ptr + rtvSz * 2 };
+    D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv    = m_postRtvHeap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE bloomARtv  = { hdrRtv.ptr + rtvSz };
+    D3D12_CPU_DESCRIPTOR_HANDLE bloomBRtv  = { hdrRtv.ptr + rtvSz * 2 };
+    D3D12_CPU_DESCRIPTOR_HANDLE distortRtv = { hdrRtv.ptr + rtvSz * 3 };
 
-    D3D12_GPU_DESCRIPTOR_HANDLE hdrSrv   = m_postSrvHeap->GetGPUDescriptorHandleForHeapStart();
-    D3D12_GPU_DESCRIPTOR_HANDLE bloomASrv = { hdrSrv.ptr + srvSz };
-    D3D12_GPU_DESCRIPTOR_HANDLE bloomBSrv = { hdrSrv.ptr + srvSz * 2 };
+    // SRV heap layout: [0]=HDR [1]=bloomA [2]=bloomB [3]=distort [4]=bloomA-dup
+    D3D12_GPU_DESCRIPTOR_HANDLE hdrSrv    = m_postSrvHeap->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE bloomASrv  = { hdrSrv.ptr + srvSz };
+    D3D12_GPU_DESCRIPTOR_HANDLE bloomBSrv  = { hdrSrv.ptr + srvSz * 2 };
+    D3D12_GPU_DESCRIPTOR_HANDLE distortSrv = { hdrSrv.ptr + srvSz * 3 }; // tonemap reads [3]+[4]
 
     // 1. Resolve MSAA → HDR target (R16G16B16A16_FLOAT)
     {
@@ -2191,7 +2405,24 @@ void DX12Context::EndFrame()
         m_commandList->ResourceBarrier(1, &b);
     }
 
-    // 5. Tonemap + composite → swap chain (HDR t0, bloomA t1)
+    // 5. Distort pass: HDR → distortTarget (CB filled in RenderScene using scene+camera)
+    {
+        D3D12_RESOURCE_BARRIER b = Trans(m_distortTarget.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        m_commandList->ResourceBarrier(1, &b);
+    }
+    m_commandList->SetGraphicsRootSignature(m_distortRootSig.Get());
+    m_commandList->SetPipelineState(m_distortPso.Get());
+    m_commandList->SetGraphicsRootConstantBufferView(0, m_shockwaveCb[m_frameIndex]->GetGPUVirtualAddress());
+    m_commandList->SetGraphicsRootDescriptorTable(1, hdrSrv);
+    m_commandList->OMSetRenderTargets(1, &distortRtv, FALSE, nullptr);
+    DrawFS(fw, fh);
+    {
+        D3D12_RESOURCE_BARRIER b = Trans(m_distortTarget.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        m_commandList->ResourceBarrier(1, &b);
+    }
+    m_commandList->SetGraphicsRootSignature(m_postRootSig.Get());
+
+    // 6. Tonemap + composite → swap chain (distort t0, bloomA dup t1 — contiguous at SRV[3]+[4])
     {
         D3D12_RESOURCE_BARRIER b = Trans(m_renderTargets[m_frameIndex].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
         m_commandList->ResourceBarrier(1, &b);
@@ -2201,7 +2432,7 @@ void DX12Context::EndFrame()
         rtv.ptr += static_cast<SIZE_T>(m_frameIndex) * m_rtvDescriptorSize;
         m_commandList->SetPipelineState(m_tonemapPso.Get());
         m_commandList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-        m_commandList->SetGraphicsRootDescriptorTable(1, hdrSrv); // t0=HDR, t1=bloomA (contiguous)
+        m_commandList->SetGraphicsRootDescriptorTable(1, distortSrv); // t0=distort, t1=bloomA dup (contiguous)
         float scanlinesVal   = m_scanlinesEnabled ? 1.0f : 0.0f;
         float ditherVal      = m_ditherEnabled    ? 1.0f : 0.0f;
         float frameTimeMs    = (m_fps > 0.0f) ? 1000.0f / m_fps : 0.0f;

@@ -1,45 +1,120 @@
 # Debug Playbook
 
 ## Build and Run Loop
-Use this baseline cycle for all changes:
-1. Build: cmake --build ./build --config Debug
-2. Run: ./build/Debug/MazeGame.exe
-3. Observe frame output and motion behavior
-4. Repeat with one focused change per iteration
 
-## If Material Init Fails
-Likely source: runtime shader compile or PSO creation failure.
+```
+Ctrl+Shift+B   Build Debug (incremental)
+F5             Launch with debugger attached
+```
 
-Checks:
-1. Inspect D3DCompile error text (OutputDebugString path in Material.cpp).
-2. Verify HLSL syntax and unique local variable names.
-3. Verify root constant counts and cbuffer fields still match C++ uploads.
-4. Confirm PSO RTV/DSV formats match swap chain/depth formats.
+For a clean build from scratch:  
+`Tasks: Run Task → Rebuild Debug`
 
-## If Scene Looks Wrong
+Check the Output panel (`Terminal` tab or `Debug Console`) for compile errors.
+`$msCompile` problem matcher highlights them inline in the editor.
 
-### Geometry not visible
-- Validate camera matrix and projection matrix terms
-- Validate world transforms and winding
-- Check culling front-face convention
+---
 
-### Shadows flicker
-- Avoid coplanar projected geometry
-- Add slight plane/layer separation
-- Keep depth testing stable and predictable
+## Diagnosing Startup Failures
 
-### Colors look blown out
-- Reduce additive lighting terms
-- Clamp/saturate final color carefully
-- Consider proper linear + tone map workflow as next upgrade
+### Black window / immediate crash
 
-## If Crash Happens In Draw
-1. Ensure material, mesh, PSO, root signature are non-null.
-2. Validate command allocator/list reset and close order.
-3. Check resource states before and after render pass.
-4. Rebuild and bisect recent edits.
+1. Check the Debug Console for `OutputDebugString` messages — the engine logs failures at each init step.
+2. The likely culprit is one of the `Create*` functions in `DX12Context::Init` returning false.
+3. Run with the **D3D12 Debug Layer** enabled:
+   - In `DX12Context::CreateDevice`, the debug layer is enabled when the `_DEBUG` preprocessor is defined (Debug config does this automatically).
+   - Attach the debugger and watch for `D3D12 ERROR:` or `D3D12 WARNING:` in the Output window.
 
-## Investigation Strategy
-- Change one thing at a time.
-- Prefer deterministic camera and animation when debugging.
-- Keep notes for each experiment: what changed, what effect observed.
+### `Material::Init` fails / sprites invisible
+
+The hero entity shader lives in `Source/Shaders/Material.hlsl` and is compiled at runtime.
+
+1. Check for `D3DCompile failed:` in the debug output — the error string shows line and column.
+2. Common causes:
+   - HLSL syntax error from a recent edit.
+   - Local variable name collision inside a function (HLSL is strict about redeclaration).
+   - `cbuffer` field added in HLSL but not in the matching C++ struct (or vice versa).
+   - Root signature `Num32BitValues` not updated after adding a cbuffer field.
+
+### Post-process pipeline fails to init
+
+Post pipelines use inline HLSL strings in `DX12Context.cpp`.
+Errors appear in the debug output as `[BrightPass/BlurH/BlurV/Tonemap] shader error:`.
+The PSO creation for a later pass can also fail if a resource format is wrong —
+confirm `m_hdrTarget` and bloom targets are all `R16G16B16A16_FLOAT`.
+
+---
+
+## Diagnosing Rendering Problems
+
+### Sprites are blank / wrong color
+
+- Check that the instanced sprite PSO `RTVFormats[0]` is `DXGI_FORMAT_R16G16B16A16_FLOAT`.
+  It must match the MSAA target format. An `R8G8B8A8_UNORM` mismatch produces blank sprites
+  (no D3D12 error on some GPUs).
+- Check that `SpriteInstanceData` C++ struct stride = 112 bytes. If a field was added or removed
+  without updating the three stride constants in `DX12Context.cpp`, every sprite reads the wrong
+  instance slot.
+- Confirm the root SRV slot for the frame: `perFrameBase + frameIndex * kMaxSpriteInstances * 112`.
+
+### Shadows missing or wrong
+
+- Confirm the shadow map barrier sequence: shadow map must be in `DEPTH_WRITE` during pass 1
+  and in `PIXEL_SHADER_RESOURCE` before the main pass samples it.
+- If shadow acne (self-shadowing noise on surfaces): increase depth bias in `m_shadowPso`.
+- If shadow map is entirely white (no depth written): check that entities are inside the
+  light frustum. The light is positioned well above the scene — verify `m_lightPos` and the
+  projection range cover all geometry.
+- Confirm SRV at slot t2 in the geometry root signature points to the shadow map, not the sprite texture.
+
+### Particles not visible
+
+- Confirm `scene.GetParticles()` is non-empty before the draw (put a breakpoint in `RenderScene`).
+- Confirm `memcpy` size: `pCount * 32` bytes (32 bytes per `SceneParticle`).
+- Confirm the particle PSO blend state: `DestBlend = ONE`. If it's `ZERO`, particles overwrite
+  the scene instead of adding to it.
+- Confirm depth write is OFF for particles. If ON, the first particle in the draw kills all
+  depth behind it.
+
+### Bloom is too strong / too weak / missing
+
+- Bright-pass threshold too high → no bloom (all pixels below threshold). Lower the luminance cutoff.
+- Bloom blend weight in tonemap shader too high → blown-out glow. Lower the bloom scale constant.
+- If bloom targets are the wrong size or format, `RenderScene` will fail silently on the resolve.
+  Confirm `m_bloomWidth/m_bloomHeight` are half of the swapchain resolution.
+
+### Fog looks wrong or doesn't match between geometry and sprites
+
+- Geometry pass uses `fogStart=20`, `fogEnd=65` with geometry blend capped at `0.7×`.
+- Instanced sprite pass uses the same fog formula — confirm the instanced shader's fog parameters
+  match `Material.hlsl`.
+- The fog color in the instanced shader is a sky-gradient (horizon/zenith blend) derived from
+  `clipYW`. If the clip-space Y passthrough is wrong, the instanced sprites will show flat fog.
+
+### Camera feels wrong / targeting ring jumps
+
+- The ray cast for the targeting ring reads `mouseAbsX/Y` from `InputState`. If those are in
+  screen coordinates but the NDC conversion uses the wrong screen size, the ring position drifts.
+  Check `input.screenW/H` is being set from `window.GetWidth()/GetHeight()` each frame.
+- After an orbit drag, the target persists. If the ring appears to teleport, confirm the forced
+  `m_camera.target = vec3(0,0,-5)` reset was removed from `Game::Update` (it was removed in a
+  prior session to enable the pan feature).
+
+### Performance: FPS drops when many meteors or particles are live
+
+- The particle system is CPU-side: `m_fireParticles` grows without bound unless particles are
+  aged out. Confirm `particle.age >= particle.maxAge` triggers removal.
+- The burning sprite system checks `e->enabled` before pushing — but removed entities that stay
+  in `m_burningSprites` with `entity=nullptr` will crash. Confirm the entity pointer is cleared
+  or the BurningSprite is removed when the entity is disabled.
+
+---
+
+## Systematic Investigation Strategy
+
+1. **Change one thing at a time.** If a fix involves touching two systems, make the change in one and verify before touching the second.
+2. **Use the debug camera.** Disable cinematic mode (Space) so the camera is stationary during a debugging session.
+3. **Bisect with `entity->enabled = false`.** Disable entity groups one at a time to isolate which system produces a visual artifact.
+4. **Validate CPU data before GPU upload.** If particles look wrong, print the first few `SceneParticle` values before the `memcpy`. GPU corruption is rare; CPU logic errors are common.
+5. **Check barriers first on GPU validation errors.** A `D3D12 ERROR: invalid state` almost always means a missing `ResourceBarrier` call.
+6. **Keep notes.** Write what you changed, what happened, and what you tried in `STUDY_GUIDE_PROGRESS.md`. Short-loop debugging without notes leads to re-trying the same things.

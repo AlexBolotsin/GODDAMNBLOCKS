@@ -513,10 +513,11 @@ void Game::Update(float dt, const InputState& input)
     }
 
     // Sprite hover animation — base Y -0.15 so feet touch floor at lowest hover point
+    // Burning sprites skip this so ragdoll physics owns their position
     for (size_t i = 0; i < m_spriteActors.size(); ++i)
     {
         Entity* sprite = m_spriteActors[i];
-        if (!sprite)
+        if (!sprite || sprite->isBurning)
             continue;
 
         const float phase = static_cast<float>(i) * 0.55f + 1.1f;
@@ -713,7 +714,15 @@ void Game::Update(float dt, const InputState& input)
             const float d2 = dx*dx + dy*dy + dz*dz;
             if (d2 > r2 && d2 < scorchR2) {
                 e->isBurning = true;
-                m_burningSprites.push_back({ e, 0.0f, 0.5f + PRng() * 0.6f, e->tint });
+
+                // Ragdoll impulse — direction away from explosion, random upward arc
+                const float dist = sqrtf(d2);
+                float nx = 0.0f, nz = 1.0f;
+                if (dist > 0.001f) { nx = dx / dist; nz = dz / dist; }
+                const float hSpeed = 2.5f + PRng() * 4.0f;
+                const vec3  impulse = { nx * hSpeed, 3.5f + PRng() * 4.5f, nz * hSpeed };
+
+                m_burningSprites.push_back({ e, 0.0f, 1.2f + PRng() * 0.8f, e->tint, impulse });
             }
         };
         for (Entity* e : m_spriteActors)     startBurning(e);
@@ -725,11 +734,30 @@ void Game::Update(float dt, const InputState& input)
         if (m_spriteActors[i] && !m_spriteActors[i]->enabled && m_blobActors[i])
             m_blobActors[i]->enabled = false;
 
-    // Update burning sprites — shift tint orange→dark, emit particles, kill on burnout
+    // Update burning sprites — ragdoll physics, tint shift, particles, kill on burnout
+    constexpr float kRagdollGravity = 14.0f;
+    constexpr float kGroundY        = -1.0f;
     for (auto& bs : m_burningSprites)
     {
         if (!bs.entity->enabled) { bs.age = bs.duration; continue; } // already kill-zoned
         bs.age += dt;
+
+        // Ragdoll — apply gravity and integrate position
+        bs.velocity.y -= kRagdollGravity * dt;
+        vec3& pos = bs.entity->transform.position;
+        pos.x += bs.velocity.x * dt;
+        pos.y += bs.velocity.y * dt;
+        pos.z += bs.velocity.z * dt;
+
+        // Bounce on ground with energy loss
+        if (pos.y < kGroundY)
+        {
+            pos.y          = kGroundY;
+            bs.velocity.y  = -bs.velocity.y * 0.28f;
+            bs.velocity.x *= 0.55f;
+            bs.velocity.z *= 0.55f;
+        }
+
         const float bt = bs.age / bs.duration;
 
         if (bt < 0.45f) {

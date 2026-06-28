@@ -36,6 +36,7 @@ class Game
         float   age;
         float   duration;
         vec4    origTint;
+        vec3    velocity; // ragdoll physics
     };
 
 public:

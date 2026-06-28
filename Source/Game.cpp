@@ -861,7 +861,7 @@ void Game::Update(float dt, const InputState& input)
         for (const auto& expl : m_explosions)
             if (expl.age < kShockwaveDuration)
                 waves.push_back({ expl.center.x, expl.center.y, expl.center.z,
-                                  expl.age, kShockwaveDuration });
+                                  expl.age, kShockwaveDuration, expl.maxRadius });
     }
 
     // ---- Scene particle list for the renderer -----------------------------

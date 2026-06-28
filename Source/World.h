@@ -5,7 +5,7 @@
 
 // Non-entity scene data — kept as plain flat structs, no ECS overhead needed
 struct SceneParticle  { float x, y, z, size, r, g, b, a; };
-struct SceneShockwave { float x, y, z, age, maxAge; };
+struct SceneShockwave { float x, y, z, age, maxAge, maxRadius; };
 
 // World — owns all entities and their component pools.
 //

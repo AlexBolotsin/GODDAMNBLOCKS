@@ -1761,9 +1761,16 @@ float4 PS_Tonemap(PSInput i) : SV_TARGET
 
 bool DX12Context::CreateDistortPipeline()
 {
-    // Shockwave data constant buffer layout — must be exactly 256 bytes (D3D12 CB minimum)
-    // float waveCount, float aspect, float[2] pad, float[8][4] waves, float[28] fill
-    static_assert(4 + 4 + 8 + 8*16 + 28*4 == 256, "ShockwaveCB size");
+    // Shockwave CB — 64 floats = 256 bytes
+    // Layout (float32 offsets):
+    //  [0]    waveCount   [1] proj00  [2] proj11  [3] groundY
+    //  [4-6]  cameraEye.xyz           [7]  pad
+    //  [8-10] cameraRight.xyz         [11] pad
+    //  [12-14] cameraUp.xyz           [15] pad
+    //  [16-18] cameraBack.xyz         [19] pad
+    //  [20-51] waves[8]: (worldX, worldZ, worldRadius, strength)
+    //  [52-63] pad
+    static_assert(64 * sizeof(float) == 256, "ShockwaveCB size");
 
     static const char* kShader = R"(
 struct PSInput { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
@@ -1771,9 +1778,20 @@ struct PSInput { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 cbuffer ShockwaveCB : register(b0)
 {
     float  waveCount;
-    float  aspect;
-    float2 _pad0;
-    float4 waves[8]; // .xy=screenUV center  .z=ring radius(0..1)  .w=strength
+    float  proj00;     // projMatrix[0][0] = cot(fovY/2)/aspect
+    float  proj11;     // projMatrix[1][1] = cot(fovY/2)
+    float  groundY;    // world-space Y of the ground plane
+
+    float3 cameraEye;
+    float  _p0;
+    float3 cameraRight; // view matrix col 0 (world-space right)
+    float  _p1;
+    float3 cameraUp;    // view matrix col 1 (world-space adjusted up)
+    float  _p2;
+    float3 cameraBack;  // view matrix col 2 = normalize(eye-target)
+    float  _p3;
+
+    float4 waves[8]; // .x=worldX  .y=worldZ  .z=worldRadius(m)  .w=uvStrength
 };
 
 Texture2D    hdrInput  : register(t0);
@@ -1793,27 +1811,46 @@ float4 PS_Distort(PSInput i) : SV_TARGET
     const int MAX_WAVES = 8;
     int count = min((int)waveCount, MAX_WAVES);
 
+    // Reconstruct world-space ray for this fragment
+    float2 ndc = float2(i.uv.x * 2.0f - 1.0f, 1.0f - i.uv.y * 2.0f);
+    float3 rayDir = normalize(
+        cameraRight * (ndc.x / proj00) +
+        cameraUp    * (ndc.y / proj11) -
+        cameraBack
+    );
+
     float2 totalOffset = float2(0.0f, 0.0f);
-    [loop]
-    for (int w = 0; w < count; ++w)
+
+    // Only fragments whose ray hits the ground plane can see the shockwave
+    if (rayDir.y < -0.001f)
     {
-        float2 center   = waves[w].xy;
-        float  radius   = waves[w].z;
-        float  strength = waves[w].w;
+        float  t_hit    = (groundY - cameraEye.y) / rayDir.y;
+        float3 worldHit = cameraEye + rayDir * t_hit;
 
-        // Correct for aspect ratio so the ring is circular on screen
-        float2 delta = i.uv - center;
-        delta.x *= aspect;
-        float  dist = length(delta);
+        [loop]
+        for (int w = 0; w < count; ++w)
+        {
+            float2 center      = waves[w].xy; // world XZ of explosion
+            float  worldRadius = waves[w].z;
+            float  strength    = waves[w].w;
 
-        const float kRingWidth = 0.032f;
-        float  ring = max(0.0f, 1.0f - abs(dist - radius) / kRingWidth);
-        ring = ring * ring; // sharpen leading edge
+            float2 delta = worldHit.xz - center;
+            float  dist  = length(delta);
 
-        // Direction back in UV space
-        float2 dir = (dist > 0.0001f) ? (delta / dist) : float2(1.0f, 0.0f);
-        dir.x /= aspect;
-        totalOffset += dir * ring * strength;
+            const float kRingWidth = 0.75f; // world-space metres
+            float ring = max(0.0f, 1.0f - abs(dist - worldRadius) / kRingWidth);
+            ring = ring * ring; // sharpen
+
+            // Project world outward direction into screen UV space
+            float3 worldOutward = (dist > 0.01f)
+                ? float3(delta.x / dist, 0.0f, delta.y / dist)
+                : float3(1.0f, 0.0f, 0.0f);
+            float  screenDx = dot(worldOutward, cameraRight);
+            float  screenDy = dot(worldOutward, cameraUp);
+            float2 uvDir    = normalize(float2(screenDx, -screenDy));
+
+            totalOffset += uvDir * ring * strength;
+        }
     }
 
     return float4(hdrInput.Sample(linearSmp, i.uv + totalOffset).rgb, 1.0f);
@@ -2273,31 +2310,45 @@ void DX12Context::RenderScene(World *world, const Camera &camera)
             }
         }
 
-        // Pre-fill shockwave CB for the distort pass in EndFrame
-        // CB layout (256 bytes = 64 floats): [0]=count [1]=aspect [2..3]=pad [4..N]=waves(cx,cy,r,s)
+        // Pre-fill shockwave CB for the distort pass in EndFrame.
+        // The ring is computed in world space via ray→ground-plane intersection,
+        // so we pass camera basis vectors and projection params instead of pre-projected UVs.
+        // View matrix col 0 = cameraRight, col 1 = cameraUp, col 2 = cameraBack (row-vector convention).
         {
-            const mat4 viewProj = MatrixMultiply(frameData.viewMatrix, frameData.projMatrix);
+            const float* vm = frameData.viewMatrix.m;  // m[row*4+col]
+            const float* pm = frameData.projMatrix.m;
+
             float swCb[64] = {};
-            swCb[1] = aspect;
+            // [0-3]: waveCount (filled at end), proj00, proj11, groundY
+            swCb[1] = pm[0];   // proj00 = f/aspect
+            swCb[2] = pm[5];   // proj11 = f
+            swCb[3] = -1.0f;   // groundY = world floor height
+
+            // [4-7]: cameraEye
+            swCb[4] = camera.eye.x;
+            swCb[5] = camera.eye.y;
+            swCb[6] = camera.eye.z;
+
+            // [8-11]: cameraRight  = view col 0 = (m[0], m[4], m[8])
+            swCb[8]  = vm[0]; swCb[9]  = vm[4]; swCb[10] = vm[8];
+
+            // [12-15]: cameraUp    = view col 1 = (m[1], m[5], m[9])
+            swCb[12] = vm[1]; swCb[13] = vm[5]; swCb[14] = vm[9];
+
+            // [16-19]: cameraBack  = view col 2 = (m[2], m[6], m[10])
+            swCb[16] = vm[2]; swCb[17] = vm[6]; swCb[18] = vm[10];
+
+            // [20+]: waves — world-space ring data
             uint32_t waveCount = 0;
-            const auto& shockwaves = world->shockwaves;
-            for (size_t si = 0; si < shockwaves.size() && waveCount < kMaxShockwaves; ++si)
+            for (const SceneShockwave& sw : world->shockwaves)
             {
-                const SceneShockwave& sw = shockwaves[si];
-                const float wx = sw.x, wy = sw.y, wz = sw.z;
-                const float clipX = wx*viewProj.m[0]+wy*viewProj.m[4]+wz*viewProj.m[8] +viewProj.m[12];
-                const float clipY = wx*viewProj.m[1]+wy*viewProj.m[5]+wz*viewProj.m[9] +viewProj.m[13];
-                const float clipW = wx*viewProj.m[3]+wy*viewProj.m[7]+wz*viewProj.m[11]+viewProj.m[15];
-                if (clipW <= 0.0f) continue;
-                const float ndcX = clipX / clipW;
-                const float ndcY = clipY / clipW;
-                if (ndcX < -1.5f || ndcX > 1.5f || ndcY < -1.5f || ndcY > 1.5f) continue;
-                const float t = sw.age / sw.maxAge;
-                const uint32_t base = 4 + waveCount * 4;
-                swCb[base + 0] = ndcX * 0.5f + 0.5f;
-                swCb[base + 1] = 1.0f - (ndcY * 0.5f + 0.5f);
-                swCb[base + 2] = t * 0.85f;
-                swCb[base + 3] = 0.025f * (1.0f - t * t);
+                if (waveCount >= kMaxShockwaves) break;
+                const float t    = sw.age / sw.maxAge;
+                const uint32_t base = 20 + waveCount * 4;
+                swCb[base + 0] = sw.x;                          // worldX
+                swCb[base + 1] = sw.z;                          // worldZ
+                swCb[base + 2] = t * sw.maxRadius;              // world-space ring radius (m)
+                swCb[base + 3] = 0.025f * (1.0f - t * t);      // UV offset strength
                 ++waveCount;
             }
             swCb[0] = static_cast<float>(waveCount);
